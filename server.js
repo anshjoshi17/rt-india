@@ -5,19 +5,18 @@ const fetch = require("node-fetch");
 const RSSParser = require("rss-parser");
 const slugify = require("slugify");
 const cheerio = require("cheerio");
-const cors = require("cors");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
 const parser = new RSSParser({
   customFields: { item: ["media:content", "enclosure"] }
 });
 
 // -------------------- SUPABASE --------------------
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 // -------------------- FEEDS --------------------
 const UTTRAKHAND_FEEDS = [
@@ -59,8 +58,7 @@ function runNext() {
   const item = queue.shift();
   if (!item) return;
   running++;
-  item
-    .fn()
+  item.fn()
     .then((v) => item.resolve(v))
     .catch((e) => item.reject(e))
     .finally(() => {
@@ -87,55 +85,42 @@ const GENRE_CANDIDATES = [
 function detectRegionFromText(text, sourceHost = "") {
   const t = (text || "").toLowerCase();
   const s = (sourceHost || "").toLowerCase();
-  const uttKeywords = [
-    "uttarakhand",
-    "dehradun",
-    "nainital",
-    "almora",
-    "pithoragarh",
-    "rudraprayag",
-    "chamoli",
-    "pauri",
-    "champawat",
-    "haridwar",
-    "rishikesh"
-  ];
+  const uttKeywords = ["uttarakhand", "dehradun", "nainital", "almora", "pithoragarh", "rudraprayag", "chamoli", "pauri", "champawat", "haridwar", "rishikesh"];
   if (uttKeywords.some((k) => t.includes(k) || s.includes(k))) return "uttarakhand";
-  const indiaKeywords = ["india", "delhi", "mumbai", "kolkata", "chennai", "bengaluru", "bangalore"];
+  const indiaKeywords = ["india", "delhi", "mumbai", "kolkata", "chennai", "bengaluru"];
   if (indiaKeywords.some((k) => t.includes(k) || s.includes(k))) return "india";
   return "international";
 }
 function detectGenreKeyword(text) {
   const t = (text || "").toLowerCase();
-  if (/\b(police|murder|accident|crime|arrest|case|court|rape)\b/.test(t)) return "Crime";
+  if (/\b(police|murder|accident|crime|arrest|case|court)\b/.test(t)) return "Crime";
   if (/\b(election|minister|congress|bjp|government|mp|mla|politic)\b/.test(t)) return "Politics";
-  if (/\b(match|score|tournament|cricket|football|player|t20|world cup)\b/.test(t)) return "Sports";
-  if (/\b(movie|film|actor|song|celebrity|bollywood|tv|festival)\b/.test(t)) return "Entertainment";
-  if (/\b(stock|market|economy|business|company|shares|price|ipo)\b/.test(t)) return "Business";
-  if (/\b(tech|ai|software|startup|google|microsoft|apple|technology)\b/.test(t)) return "Technology";
+  if (/\b(match|score|tournament|cricket|football|player)\b/.test(t)) return "Sports";
+  if (/\b(movie|film|actor|song|celebrity|bollywood|tv)\b/.test(t)) return "Entertainment";
+  if (/\b(stock|market|economy|business|company|shares|price)\b/.test(t)) return "Business";
+  if (/\b(tech|ai|software|startup|google|microsoft|apple)\b/.test(t)) return "Technology";
   if (/\b(health|covid|hospital|doctor|disease|vaccine)\b/.test(t)) return "Health";
-  if (/\b(climate|forest|river|pollution|environment|wildlife|conservation)\b/.test(t)) return "Environment";
-  if (/\b(school|college|education|exam|university|result)\b/.test(t)) return "Education";
-  if (/\b(food|travel|fashion|lifestyle|culture|festival)\b/.test(t)) return "Lifestyle";
-  if (/\b(weather|rain|storm|flood|temperature|forecast)\b/.test(t)) return "Weather";
+  if (/\b(climate|forest|river|pollution|environment|wildlife)\b/.test(t)) return "Environment";
+  if (/\b(school|college|education|exam|university)\b/.test(t)) return "Education";
+  if (/\b(food|travel|fashion|lifestyle|culture)\b/.test(t)) return "Lifestyle";
+  if (/\b(weather|rain|storm|flood|temperature)\b/.test(t)) return "Weather";
   return "Other";
 }
 
 // -------------------- PUTER (NODE) INIT - Claude-ready --------------------
 let puter = null;
 try {
+  // try common package paths so requiring works across installs
   try {
-    // try package default
-    const pkg = require("@heyputer/puter.js");
-    if (pkg?.init) {
-      puter = pkg.init ? pkg.init(process.env.PUTER_AUTH_TOKEN || null) : pkg;
-    } else if (pkg?.default?.init) {
-      puter = pkg.default.init ? pkg.default.init(process.env.PUTER_AUTH_TOKEN || null) : pkg.default;
-    } else {
-      puter = pkg;
+    // preferred: official npm package
+    puter = require("@heyputer/puter.js");
+    if (puter?.init) {
+      puter = puter.init ? puter.init(process.env.PUTER_AUTH_TOKEN || null) : puter;
+    } else if (puter?.default?.init) {
+      puter = puter.default.init ? puter.default.init(process.env.PUTER_AUTH_TOKEN || null) : puter.default;
     }
   } catch (e) {
-    // older packaging path
+    // fallback to specific path (older packaging)
     const pInit = require("@heyputer/puter.js/src/init.cjs");
     puter = pInit.init ? pInit.init(process.env.PUTER_AUTH_TOKEN || null) : null;
   }
@@ -163,7 +148,8 @@ async function deepseekRewrite(text) {
       ],
       max_tokens: 1200,
       temperature: 0.0
-    })
+    }),
+    timeout: 30000
   });
   const j = await r.json();
   const out = j?.choices?.[0]?.message?.content;
@@ -217,17 +203,23 @@ async function geminiRewrite(text) {
 // --------- Puter provider wrapper (supports Claude models) ----------
 async function puterRewrite(text) {
   if (!puter) throw new Error("Puter not initialized");
-  const model = process.env.PUTER_MODEL || "claude-sonnet-4-5";
+  // use PUTER_MODEL env to allow selecting Claude or other Puter-supported models
+  const model = process.env.PUTER_MODEL || "claude-sonnet-4-5"; // default to Claude Sonnet (per your request)
+  // puter.ai.chat can be used with (prompt, options) or (content, media, options)
   const options = { model, stream: false, temperature: Number(process.env.PUTER_TEMPERATURE || 0.0) };
+  // Some Puter SDK builds return a promise directly; some return an iterable when stream=true.
   const resp = await puter.ai.chat(text, options);
+  // normalize common shapes
   if (typeof resp === "string") return resp;
   if (resp?.message?.content && Array.isArray(resp.message.content) && resp.message.content[0]?.text) {
+    // Puter Claude shape: resp.message.content[0].text
     return resp.message.content[0].text;
   }
   if (resp?.message?.content && typeof resp.message.content === "string") {
     return resp.message.content;
   }
   if (resp?.text) return resp.text;
+  // fallback stringify
   return String(resp);
 }
 
@@ -239,8 +231,6 @@ const providers = [
   { name: "local_llama", fn: localLlamaRewrite, enabled: !!process.env.LOCAL_LLAMA_URL },
   { name: "gemini", fn: geminiRewrite, enabled: !!(process.env.GEMINI_API_KEY && process.env.GEMINI_ENDPOINT) }
 ].filter((p) => p.enabled);
-
-console.log("Enabled providers:", providers.map((p) => p.name));
 
 // -------------------- PARALLEL ORCHESTRATION --------------------
 function withTimeout(promise, ms, name) {
@@ -270,6 +260,7 @@ async function rewriteWithParallel(text) {
     const result = await Promise.any(attempts);
     return { text: result.text, provider: result.provider, timed_out: false };
   } catch (agg) {
+    // all providers failed
     return { text, provider: null, timed_out: true, error: agg };
   }
 }
@@ -338,6 +329,7 @@ async function processApiSources(region) {
         const aiOut = aiResult.text;
         const providerUsed = aiResult.provider;
 
+        // genre detection (HF zero-shot if available)
         let genre = "Other";
         if (process.env.HUGGINGFACE_API_KEY) {
           try {
@@ -510,76 +502,28 @@ setInterval(async () => {
 }, CLEANUP_HOURS * 60 * 60 * 1000);
 
 // -------------------- HTTP API --------------------
-
-// health
-app.get("/health", (req, res) => res.json({ ok: true, time: new Date().toISOString(), providers: providers.map((p) => p.name) }));
-
-// list - supports filtering & limit
 app.get("/api/news", async (req, res) => {
-  try {
-    const { limit = 50, genre, region } = req.query;
-    let qb = supabase
-      .from("ai_news")
-      .select("id,title,slug,short_desc,image_url,source,region,genre,published_at,created_at")
-      .order("created_at", { ascending: false })
-      .limit(Math.min(Number(limit) || 50, 200));
-    if (genre) qb = qb.eq("genre", genre);
-    if (region) qb = qb.eq("region", region);
-    const { data, error } = await qb;
-    if (error) return res.status(500).json({ error: error.message });
-    res.json(data || []);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  const { limit = 50, genre, region } = req.query;
+  let qb = supabase.from("ai_news").select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at").order("created_at", { ascending: false }).limit(Number(limit));
+  if (genre) qb = qb.eq("genre", genre);
+  if (region) qb = qb.eq("region", region);
+  const { data, error } = await qb;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
 });
 
-// region route - returns fields useful for hero (limit param accepted)
-app.get("/api/news/region/:region", async (req, res) => {
-  try {
-    const region = req.params.region;
-    const limit = Math.min(Number(req.query.limit || 6), 50);
-    const { data, error } = await supabase
-      .from("ai_news")
-      .select("title,slug,short_desc,image_url,source,published_at,region,genre")
-      .eq("region", region)
-      .order("published_at", { ascending: false })
-      .limit(limit);
-
-    if (error) return res.status(500).json({ error: error.message });
-    return res.json(data || []);
-  } catch (e) {
-    console.error("region route error:", e);
-    return res.status(500).json({ error: String(e) });
-  }
-});
-
-// single article
 app.get("/api/news/:slug", async (req, res) => {
-  try {
-    const { data, error } = await supabase.from("ai_news").select("*").eq("slug", req.params.slug).single();
-    if (error) return res.status(404).json({ error: "Not found" });
-    res.json(data || {});
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  const { data, error } = await supabase.from("ai_news").select("*").eq("slug", req.params.slug).single();
+  if (error) return res.status(404).json({ error: "Not found" });
+  res.json(data || {});
 });
 
-// search (title)
 app.get("/api/search", async (req, res) => {
-  try {
-    const q = req.query.q || "";
-    if (!q) return res.json([]);
-    const { data, error } = await supabase
-      .from("ai_news")
-      .select("id,title,slug,short_desc,image_url,region,genre,published_at")
-      .ilike("title", `%${q}%`)
-      .order("created_at", { ascending: false })
-      .limit(50);
-    if (error) return res.status(500).json({ error: error.message });
-    res.json(data || []);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  const q = req.query.q || "";
+  if (!q) return res.json([]);
+  const { data, error } = await supabase.from("ai_news").select("id,title,slug,short_desc,image_url,region,genre,published_at").ilike("title", `%${q}%`).order("created_at", { ascending: false }).limit(50);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
 });
 
 // -------------------- START --------------------
