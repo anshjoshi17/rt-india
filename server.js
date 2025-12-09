@@ -1,6 +1,7 @@
 // server.js
 require("dotenv").config();
 const express = require("express");
+const cors = require("cors");
 const fetch = require("node-fetch");
 const RSSParser = require("rss-parser");
 const slugify = require("slugify");
@@ -8,6 +9,93 @@ const cheerio = require("cheerio");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
+
+// -------------------- CORS CONFIGURATION FOR RENDER --------------------
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, postman)
+    if (!origin) return callback(null, true);
+    
+    // List of allowed origins for Render deployment
+    const allowedOrigins = [
+      'https://rt-india.onrender.com', // Your Render backend (for internal requests)
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:5173',
+      // Add your frontend domains here when deployed
+      // 'https://your-frontend-domain.com',
+      // 'https://your-frontend.onrender.com',
+    ];
+    
+    // In production, you might want to allow all origins or specific ones
+    if (process.env.NODE_ENV === 'production') {
+      // For production, you can either:
+      // 1. Allow specific domains (recommended)
+      // 2. Allow all origins (use with caution)
+      
+      // Option 1: Specific domains (uncomment and modify as needed)
+      // if (allowedOrigins.includes(origin)) {
+      //   callback(null, true);
+      // } else {
+      //   callback(new Error('Not allowed by CORS'));
+      // }
+      
+      // Option 2: Allow all origins in production (temporary for testing)
+      callback(null, true);
+    } else {
+      // Development: Allow from allowedOrigins list
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400, // 24 hours
+  optionsSuccessStatus: 200
+};
+
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Handle preflight requests globally
+app.options('*', cors(corsOptions));
+
+// Security headers for Render
+app.use((req, res, next) => {
+  // Render-specific headers
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-Frame-Options', 'DENY');
+  res.header('X-XSS-Protection', '1; mode=block');
+  
+  // CORS headers
+  const origin = req.headers.origin;
+  if (origin) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-CSRF-Token');
+  res.header('Access-Control-Expose-Headers', 'Content-Range, X-Content-Range');
+  res.header('Access-Control-Max-Age', '86400');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  next();
+});
+
+// Body parsing middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 const parser = new RSSParser({
   customFields: { item: ["media:content", "enclosure"] }
 });
@@ -44,7 +132,7 @@ function sanitizeXml(xml) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // -------------------- CONCURRENCY QUEUE --------------------
-const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS) || 4;
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS) || 2; // Reduced for Render free tier
 let running = 0;
 const queue = [];
 function enqueueTask(fn) {
@@ -242,11 +330,11 @@ async function rewriteWithParallel(text) {
   if (!providers.length) {
     return { text, provider: null, timed_out: false };
   }
-  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 20000;
+  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 15000; // Reduced for Render
   const attempts = providers.map((p) =>
     withTimeout(
       (async () => {
-        await sleep(Math.floor(Math.random() * 80));
+        await sleep(Math.floor(Math.random() * 50)); // Reduced delay
         const out = await p.fn(text);
         if (!out || String(out).trim().length < 10) throw new Error("empty output");
         return { text: String(out).trim(), provider: p.name };
@@ -278,7 +366,7 @@ async function discoverRSS(html, baseUrl) {
 }
 
 // -------------------- NEWS API FETCHERS --------------------
-async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 15) {
+async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 10) { // Reduced for Render
   if (!process.env.NEWSAPI_KEY) return [];
   const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&pageSize=${pageSize}&language=en&sortBy=publishedAt&apiKey=${process.env.NEWSAPI_KEY}`;
   const r = await fetch(url);
@@ -286,7 +374,7 @@ async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 15) {
   if (!j.articles) return [];
   return j.articles.map((a) => ({ title: a.title, link: a.url, pubDate: a.publishedAt, description: a.description || "", image: a.urlToImage || null, source: a.source?.name || null }));
 }
-async function fetchFromGNews(q = "uttarakhand", max = 15) {
+async function fetchFromGNews(q = "uttarakhand", max = 10) { // Reduced for Render
   if (!process.env.GNEWS_KEY) return [];
   const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&token=${process.env.GNEWS_KEY}&lang=en&max=${max}`;
   const r = await fetch(url);
@@ -301,20 +389,20 @@ async function processApiSources(region) {
   const all = [];
   if (process.env.NEWSAPI_KEY) {
     try {
-      all.push(...(await fetchFromNewsAPI(q, 20)));
+      all.push(...(await fetchFromNewsAPI(q, 10)));
     } catch (e) {
       console.warn("NewsAPI fail", e.message || e);
     }
   }
   if (process.env.GNEWS_KEY) {
     try {
-      all.push(...(await fetchFromGNews(q, 20)));
+      all.push(...(await fetchFromGNews(q, 10)));
     } catch (e) {
       console.warn("GNews fail", e.message || e);
     }
   }
 
-  for (const item of all.slice(0, 80)) {
+  for (const item of all.slice(0, 20)) { // Process fewer items for Render
     enqueueTask(async () => {
       try {
         const url = item.link;
@@ -389,7 +477,7 @@ async function processFeeds(feedList, region) {
       const rss = await parser.parseString(text);
       if (!rss.items) continue;
 
-      for (const item of rss.items.slice(0, 12)) {
+      for (const item of rss.items.slice(0, 8)) { // Process fewer items
         enqueueTask(async () => {
           try {
             const url = item.link || item.guid;
@@ -453,7 +541,7 @@ async function processFeeds(feedList, region) {
 }
 
 // -------------------- CLEANUP --------------------
-async function cleanupOldArticles(days = 4) {
+async function cleanupOldArticles(days = 7) { // Increased to 7 days for Render
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.warn("Skipping cleanup: SUPABASE_SERVICE_ROLE_KEY required.");
     return;
@@ -469,63 +557,214 @@ async function cleanupOldArticles(days = 4) {
 }
 
 // -------------------- BOOTSTRAP & SCHEDULE --------------------
-(async function bootstrap() {
+// Initial run with delay for Render spin-up
+setTimeout(async () => {
   try {
-    console.log("Initial run: API sources + RSS");
+    console.log("🚀 Initial run starting on Render...");
     await processApiSources("uttarakhand");
     await processFeeds(UTTRAKHAND_FEEDS, "uttarakhand");
     await processApiSources("india");
     await processFeeds(INDIA_FEEDS, "india");
     await processApiSources("international");
-    await cleanupOldArticles(Number(process.env.CLEANUP_DAYS) || 4);
+    await cleanupOldArticles(Number(process.env.CLEANUP_DAYS) || 7);
+    console.log("✅ Initial run completed on Render");
   } catch (e) {
     console.error("Bootstrap error:", e.message || e);
   }
-})();
+}, 10000); // 10 second delay for Render spin-up
 
-const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 5;
+const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 15; // Increased for Render free tier
 setInterval(async () => {
   try {
+    console.log(`🔄 Periodic run started on Render (every ${POLL_MINUTES} minutes)`);
     await processApiSources("uttarakhand");
     await processFeeds(UTTRAKHAND_FEEDS, "uttarakhand");
     await processApiSources("india");
     await processFeeds(INDIA_FEEDS, "india");
     await processApiSources("international");
+    console.log("✅ Periodic run completed on Render");
   } catch (e) {
     console.warn("Periodic run error:", e.message || e);
   }
 }, POLL_MINUTES * 60 * 1000);
 
-const CLEANUP_HOURS = Number(process.env.CLEANUP_INTERVAL_HOURS) || 6;
+const CLEANUP_HOURS = Number(process.env.CLEANUP_INTERVAL_HOURS) || 12; // Increased for Render
 setInterval(async () => {
-  await cleanupOldArticles(Number(process.env.CLEANUP_DAYS) || 4);
+  console.log("🧹 Running cleanup on Render...");
+  await cleanupOldArticles(Number(process.env.CLEANUP_DAYS) || 7);
 }, CLEANUP_HOURS * 60 * 60 * 1000);
 
 // -------------------- HTTP API --------------------
 app.get("/api/news", async (req, res) => {
-  const { limit = 50, genre, region } = req.query;
-  let qb = supabase.from("ai_news").select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at").order("created_at", { ascending: false }).limit(Number(limit));
-  if (genre) qb = qb.eq("genre", genre);
-  if (region) qb = qb.eq("region", region);
-  const { data, error } = await qb;
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data || []);
+  try {
+    const { limit = 30, genre, region, page = 1 } = req.query;
+    const pageSize = Math.min(Number(limit), 100);
+    const pageNum = Math.max(Number(page), 1);
+    const offset = (pageNum - 1) * pageSize;
+    
+    let qb = supabase
+      .from("ai_news")
+      .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at", { count: 'exact' })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + pageSize - 1);
+    
+    if (genre) qb = qb.eq("genre", genre);
+    if (region) qb = qb.eq("region", region);
+    
+    const { data, error, count } = await qb;
+    
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({ error: "Database error", message: error.message });
+    }
+    
+    res.json({
+      data: data || [],
+      pagination: {
+        page: pageNum,
+        limit: pageSize,
+        total: count || 0,
+        totalPages: count ? Math.ceil(count / pageSize) : 0
+      }
+    });
+  } catch (error) {
+    console.error("API error:", error);
+    res.status(500).json({ error: "Server error", message: error.message });
+  }
 });
 
 app.get("/api/news/:slug", async (req, res) => {
-  const { data, error } = await supabase.from("ai_news").select("*").eq("slug", req.params.slug).single();
-  if (error) return res.status(404).json({ error: "Not found" });
-  res.json(data || {});
+  try {
+    const { data, error } = await supabase
+      .from("ai_news")
+      .select("*")
+      .eq("slug", req.params.slug)
+      .single();
+    
+    if (error || !data) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+    
+    res.json(data);
+  } catch (error) {
+    console.error("API error:", error);
+    res.status(500).json({ error: "Server error", message: error.message });
+  }
 });
 
 app.get("/api/search", async (req, res) => {
-  const q = req.query.q || "";
-  if (!q) return res.json([]);
-  const { data, error } = await supabase.from("ai_news").select("id,title,slug,short_desc,image_url,region,genre,published_at").ilike("title", `%${q}%`).order("created_at", { ascending: false }).limit(50);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data || []);
+  try {
+    const q = req.query.q || "";
+    if (!q.trim()) return res.json({ data: [] });
+    
+    const { data, error } = await supabase
+      .from("ai_news")
+      .select("id,title,slug,short_desc,image_url,region,genre,published_at")
+      .or(`title.ilike.%${q}%,ai_content.ilike.%${q}%,short_desc.ilike.%${q}%`)
+      .order("created_at", { ascending: false })
+      .limit(30);
+    
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({ error: "Database error", message: error.message });
+    }
+    
+    res.json({ data: data || [] });
+  } catch (error) {
+    console.error("API error:", error);
+    res.status(500).json({ error: "Server error", message: error.message });
+  }
 });
 
-// -------------------- START --------------------
+// -------------------- HEALTH CHECK --------------------
+app.get("/health", (req, res) => {
+  const health = {
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    service: "AI News Aggregator",
+    deployment: "Render",
+    url: "https://rt-india.onrender.com",
+    providers: providers.map(p => p.name),
+    queue: {
+      running,
+      pending: queue.length,
+      maxConcurrent: MAX_CONCURRENT
+    },
+    environment: process.env.NODE_ENV || 'development'
+  };
+  res.status(200).json(health);
+});
+
+app.get("/", (req, res) => {
+  res.json({
+    message: "AI News Aggregator API",
+    version: "1.0.0",
+    deployment: "Render",
+    endpoints: {
+      news: "/api/news",
+      singleArticle: "/api/news/:slug",
+      search: "/api/search",
+      health: "/health"
+    },
+    status: "operational",
+    documentation: "See /health for system status"
+  });
+});
+
+// -------------------- ERROR HANDLING --------------------
+app.use((err, req, res, next) => {
+  console.error("Server error:", err);
+  
+  // Handle CORS errors
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ 
+      error: 'CORS Error', 
+      message: 'Origin not allowed',
+      allowedOrigins: [
+        'https://rt-india.onrender.com',
+        'http://localhost:3000',
+        'http://localhost:5173'
+      ]
+    });
+  }
+  
+  res.status(500).json({ 
+    error: 'Internal Server Error',
+    message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : err.message,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Handle 404
+app.use((req, res) => {
+  res.status(404).json({ 
+    error: 'Route not found',
+    path: req.path,
+    method: req.method,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// -------------------- START SERVER --------------------
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("✅ AI News Backend Running on port", PORT));
+
+// Graceful shutdown for Render
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT signal received: closing HTTP server');
+  process.exit(0);
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ AI News Backend Running on Render`);
+  console.log(`📍 URL: https://rt-india.onrender.com`);
+  console.log(`🚪 Port: ${PORT}`);
+  console.log(`🌍 CORS: Enabled for all origins in production`);
+  console.log(`⏰ Poll Interval: ${POLL_MINUTES} minutes`);
+  console.log(`🧹 Cleanup Interval: ${CLEANUP_HOURS} hours`);
+  console.log(`🤖 Available AI Providers: ${providers.map(p => p.name).join(', ')}`);
+});
