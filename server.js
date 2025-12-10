@@ -369,19 +369,23 @@ function buildRewritePromptHindi({ sourceTitle, sourceUrl, sourceText }) {
   const MIN = Number(process.env.MIN_AI_WORDS) || 300;
   const MAX = Number(process.env.MAX_AI_WORDS) || 400;
   return (
-    "आप एक अनुभवी समाचार संपादक हैं।\n\n" +
-    `कार्य: नीचे दी गई स्रोत सामग्री के आधार पर एक नया, मौलिक समाचार लेख लिखें — पूरी तरह **हिन्दी** में। लेख लगभग ${MIN}-${MAX} शब्दों का होना चाहिए।\n\n` +
-    "महत्वपूर्ण निर्देश:\n" +
-    "- लेख की शुरुआत एक नया हेडलाइन (headline) दें जो स्रोत हेडलाइन से अलग हो। हेडलाइन को एक अलग लाइन में इस प्रारूप से लिखें: `HEADLINE: <आपका हेडलाइन>`\n" +
-    "- उसके बाद एक खाली लाइन रखें और फिर पूरा लेख लिखें।\n" +
-    "- स्रोत में दिए गए तथ्यों (नाम, स्थान, तारीख, उद्धरण) को बनाए रखें। किसी भी तथ्य का आविष्कार न करें।\n" +
-    "- आउटपुट सिर्फ सादा-पाठ (plain text) होना चाहिए — **कोई HTML या Markdown नहीं**। छोटे पैराग्राफ (2-4 वाक्य) रखें।\n\n" +
-    `स्रोत शीर्षक: ${String(sourceTitle || "").trim()}\n` +
-    `स्रोत URL: ${String(sourceUrl || "")}\n\n` +
-    `स्रोत सामग्री:\n\n${String(sourceText || "").trim()}\n\n` +
-    `आउटपुट प्रारूप:\nHEADLINE: <यहां आपका नया हेडलाइन>\n\n<यहां लेख का शरीर — केवल हिन्दी में, सादा पाठ>` 
+    "You are an experienced news editor. IMPORTANT: **Only output the final result between the markers <<<START-OUTPUT>>> and <<<END-OUTPUT>>>. Do not repeat the prompt, do not include the source text, and do not include any system or debug text.**\n\n" +
+    `Task: Based on the source content below, produce a brand-new Dutch-free headline and an original Hindi article of approximately ${MIN}-${MAX} words.\n\n` +
+    "Output format (ONLY this format):\n" +
+    "<<<START-OUTPUT>>>\n" +
+    "HEADLINE: <your new Hindi headline, not identical to source>\n\n" +
+    "<article body in Hindi, plain text, short paragraphs>\n" +
+    "<<<END-OUTPUT>>>\n\n" +
+    "Important rules:\n" +
+    "- Preserve factual information (names, dates, locations, quotes). Do NOT invent facts.\n" +
+    "- Output only plain text (no HTML, no Markdown).\n" +
+    "- DO NOT repeat instructions or source material in the output.\n\n" +
+    `Source title: ${String(sourceTitle || "").trim()}\n` +
+    `Source URL: ${String(sourceUrl || "")}\n\n` +
+    `Source content:\n\n${String(sourceText || "").trim()}\n\n`
   );
 }
+
 
 function withTimeout(promise, ms, name) {
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${ms}ms (${name})`)), ms));
