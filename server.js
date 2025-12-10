@@ -11,16 +11,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-/**
- * --------------------
- * CORS: robust, applied EARLY
- * --------------------
- *
- * Controls:
- *  - CORS_ALLOW_ALL=true -> allows any origin (use with caution)
- *  - CORS_ALLOW_CREDENTIALS=true -> allows credentials (cookies) and will echo origin (never use '*' with credentials)
- *  - ADDITIONAL_ALLOWED_ORIGINS -> comma-separated extra origins
- */
+/* -------------------- CORS Configuration -------------------- */
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://rt-india.com",
   "https://www.rt-india.com",
@@ -37,24 +28,14 @@ const extraOrigins = (process.env.ADDITIONAL_ALLOWED_ORIGINS || "")
   .filter(Boolean);
 
 const allowedOrigins = Array.from(new Set(DEFAULT_ALLOWED_ORIGINS.concat(extraOrigins)));
-
 const allowAll = String(process.env.CORS_ALLOW_ALL || "false").toLowerCase() === "true";
 const allowCredentials = String(process.env.CORS_ALLOW_CREDENTIALS || "false").toLowerCase() === "true";
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // allow server-to-server or tools where origin is undefined
     if (!origin) return callback(null, true);
-
-    if (allowAll) {
-      // if credentials are allowed, we must echo the origin (cors package does that)
-      return callback(null, true);
-    }
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
+    if (allowAll) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error("Not allowed by CORS: " + origin));
   },
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
@@ -70,14 +51,12 @@ const corsOptions = {
   ],
   exposedHeaders: ["Content-Range", "X-Content-Range"],
   credentials: allowCredentials,
-  maxAge: 86400 // 24 hours
+  maxAge: 86400
 };
 
-// Apply CORS as the very first middleware (before routes, before body parsers)
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // preflight handler for all routes
+app.options("*", cors(corsOptions));
 
-// Basic security headers (do not override CORS headers set by cors())
 app.use((req, res, next) => {
   res.header("X-Content-Type-Options", "nosniff");
   res.header("X-Frame-Options", "DENY");
@@ -85,36 +64,29 @@ app.use((req, res, next) => {
   next();
 });
 
-// Body parsing (after CORS so preflight isn't messed up)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* -------------------- RSS parser -------------------- */
+/* -------------------- RSS Parser -------------------- */
 const parser = new RSSParser({
   customFields: { item: ["media:content", "enclosure"] }
 });
 
-/* -------------------- SUPABASE -------------------- */
+/* -------------------- Supabase -------------------- */
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-/* -------------------- FEEDS (expanded Hindi / Uttarakhand list) -------------------- */
+/* -------------------- Feeds -------------------- */
 const UTTRAKHAND_FEEDS = [
   "https://www.amarujala.com/rss/uttarakhand.xml",
-  "https://zeenews.india.com/hindi/rss/state/uttarakhand.xml",
-  "https://www.jagran.com/rss/uttarakhand",
-  "https://www.livehindustan.com/rss/uttarakhand",
-  "https://www.bhaskar.com/rss/uttarakhand"
+  "https://zeenews.india.com/hindi/rss/state/uttarakhand.xml"
 ];
 
 const INDIA_FEEDS = [
   "https://feeds.feedburner.com/ndtvkhabar",
-  "https://aajtak.intoday.in/rssfeeds/?id=home",
-  "https://www.jagran.com/rss/home",
-  "https://www.livehindustan.com/rss",
-  "https://www.bhaskar.com/rss"
+  "https://aajtak.intoday.in/rssfeeds/?id=home"
 ];
 
-/* -------------------- UTILS -------------------- */
+/* -------------------- Utils -------------------- */
 function makeSlug(text) {
   return (
     slugify(String(text || "").slice(0, 120), { lower: true, strict: true }) +
@@ -122,22 +94,26 @@ function makeSlug(text) {
     Math.random().toString(36).slice(2, 7)
   );
 }
+
 function sanitizeXml(xml) {
   if (!xml) return xml;
   return xml.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)/g, "&amp;");
 }
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* -------------------- CONCURRENCY QUEUE -------------------- */
-const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS) || 2; // tuned for Render
+/* -------------------- Concurrency Queue -------------------- */
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS) || 1;
 let running = 0;
 const queue = [];
+
 function enqueueTask(fn) {
   return new Promise((resolve, reject) => {
     queue.push({ fn, resolve, reject });
     runNext();
   });
 }
+
 function runNext() {
   if (running >= MAX_CONCURRENT) return;
   const item = queue.shift();
@@ -153,7 +129,7 @@ function runNext() {
     });
 }
 
-/* -------------------- DETECTION HELPERS -------------------- */
+/* -------------------- Detection Helpers -------------------- */
 const GENRE_CANDIDATES = [
   "Politics",
   "Crime",
@@ -168,6 +144,7 @@ const GENRE_CANDIDATES = [
   "Weather",
   "Other"
 ];
+
 function detectRegionFromText(text, sourceHost = "") {
   const t = (text || "").toLowerCase();
   const s = (sourceHost || "").toLowerCase();
@@ -189,6 +166,7 @@ function detectRegionFromText(text, sourceHost = "") {
   if (indiaKeywords.some((k) => t.includes(k) || s.includes(k))) return "india";
   return "international";
 }
+
 function detectGenreKeyword(text) {
   const t = (text || "").toLowerCase();
   if (/\b(police|murder|accident|crime|arrest|case|court)\b/.test(t)) return "Crime";
@@ -205,31 +183,35 @@ function detectGenreKeyword(text) {
   return "Other";
 }
 
-/* -------------------- PUTER (NODE) INIT - Claude-ready -------------------- */
-let puter = null;
-try {
-  try {
-    puter = require("@heyputer/puter.js");
-    if (puter?.init) {
-      puter = puter.init ? puter.init(process.env.PUTER_AUTH_TOKEN || null) : puter;
-    } else if (puter?.default?.init) {
-      puter = puter.default.init ? puter.default.init(process.env.PUTER_AUTH_TOKEN || null) : puter.default;
-    }
-  } catch (e) {
-    const pInit = require("@heyputer/puter.js/src/init.cjs");
-    puter = pInit.init ? pInit.init(process.env.PUTER_AUTH_TOKEN || null) : null;
-  }
-  console.log("Puter initialized:", !!puter);
-} catch (e) {
-  puter = null;
-  console.warn("Puter.js not available or failed to init:", e?.message || e);
+/* -------------------- AI Provider Configuration -------------------- */
+// SIMPLIFIED PROMPT - Most important fix
+function buildRewritePromptHindi({ sourceTitle, sourceText }) {
+  return `You are an expert Hindi news writer. Write a complete Hindi news article based on the following information.
+
+IMPORTANT: Write ONLY the article in Hindi. Do NOT include any English text, instructions, or formatting markers.
+Write in proper Hindi (Devanagari script) with short paragraphs.
+
+Include:
+1. A catchy headline (in Hindi)
+2. The article body (300-400 words in Hindi)
+3. Write naturally like a news article
+
+Source information: ${sourceTitle || "No title"}
+
+Content to rewrite: ${sourceText || ""}
+
+Now write the Hindi news article:`;
 }
 
-/* -------------------- AI PROVIDER WRAPPERS -------------------- */
-// (Kept mostly unchanged from your original — adjust / secure keys in env)
-async function deepseekRewrite(text) {
+/* -------------------- FIXED AI Provider Functions -------------------- */
+// DeepSeek with proper Hindi instructions
+async function deepseekRewrite(prompt) {
   if (!process.env.DEEPSEEK_API_KEY) throw new Error("DeepSeek not configured");
-  const r = await fetch("https://api.deepseek.com/chat/completions", {
+  
+  // Simplified system message
+  const systemMessage = "You are an expert Hindi journalist. Always respond in Hindi using Devanagari script. Write complete news articles.";
+  
+  const response = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -238,696 +220,729 @@ async function deepseekRewrite(text) {
     body: JSON.stringify({
       model: "deepseek-chat",
       messages: [
-        { role: "system", content: "You are an experienced Hindi news editor. Always write in Hindi using Devanagari script. Follow formatting instructions exactly." },
-        { role: "user", content: text }
+        { role: "system", content: systemMessage },
+        { role: "user", content: prompt }
       ],
       max_tokens: 1500,
-      temperature: 0.0
-    })
+      temperature: 0.3
+    }),
+    timeout: 30000
   });
-  const j = await r.json();
-  const out = j?.choices?.[0]?.message?.content;
-  if (!out || String(out).trim().length < 10) throw new Error("DeepSeek empty");
-  return out;
+
+  if (!response.ok) {
+    throw new Error(`DeepSeek API error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  
+  if (!content || content.trim().length < 50) {
+    throw new Error("DeepSeek returned empty or too short content");
+  }
+  
+  return content;
 }
 
-async function hfRewrite(text) {
+// HuggingFace
+async function hfRewrite(prompt) {
   if (!process.env.HUGGINGFACE_API_KEY) throw new Error("HuggingFace not configured");
-  const model = process.env.HF_GEN_MODEL || "google/flan-t5-large";
+  
+  const model = process.env.HF_GEN_MODEL || "google/flan-t5-xxl";
   const url = `https://api-inference.huggingface.co/models/${model}`;
-  const r = await fetch(url, {
+  
+  const response = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ inputs: text, parameters: { max_new_tokens: 600 } })
-  });
-  const j = await r.json();
-  if (typeof j === "string") return j;
-  if (Array.isArray(j) && j[0]?.generated_text) return j[0].generated_text;
-  if (j?.generated_text) return j.generated_text;
-  throw new Error("HF unexpected response");
-}
-
-async function localLlamaRewrite(text) {
-  if (!process.env.LOCAL_LLAMA_URL) throw new Error("Local Llama not configured");
-  const r = await fetch(process.env.LOCAL_LLAMA_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { 
+      Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`, 
+      "Content-Type": "application/json" 
+    },
     body: JSON.stringify({ 
-      prompt: text,
-      max_tokens: 800,
-      temperature: 0.1
-    })
+      inputs: prompt,
+      parameters: { 
+        max_new_tokens: 500,
+        temperature: 0.3,
+        do_sample: true
+      }
+    }),
+    timeout: 30000
   });
-  const j = await r.json();
-  if (j?.generated_text) return j.generated_text;
-  if (j?.choices?.[0]?.text) return j.choices[0].text;
-  if (j?.result) return j.result;
-  throw new Error("Local Llama unexpected");
+
+  if (!response.ok) {
+    throw new Error(`HuggingFace API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  
+  if (Array.isArray(data) && data[0]?.generated_text) {
+    return data[0].generated_text;
+  } else if (data?.generated_text) {
+    return data.generated_text;
+  } else if (typeof data === "string") {
+    return data;
+  }
+  
+  throw new Error("HuggingFace returned unexpected format");
 }
 
-async function geminiRewrite(text) {
-  if (!process.env.GEMINI_API_KEY || !process.env.GEMINI_ENDPOINT) throw new Error("Gemini not configured");
-  const r = await fetch(process.env.GEMINI_ENDPOINT, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.GEMINI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: text, max_output_tokens: 800, temperature: 0.0 })
-  });
-  const j = await r.json();
-  const cand = j?.candidates?.[0]?.content || j?.choices?.[0]?.message?.content || null;
-  if (!cand) throw new Error("Gemini unexpected");
-  return cand;
+// Puter (Claude)
+let puter = null;
+try {
+  if (process.env.PUTER_AUTH_TOKEN) {
+    try {
+      puter = require("@heyputer/puter.js");
+      if (puter?.init) {
+        puter = puter.init(process.env.PUTER_AUTH_TOKEN);
+      }
+      console.log("Puter initialized:", !!puter);
+    } catch (e) {
+      console.warn("Puter.js init failed:", e.message);
+      puter = null;
+    }
+  }
+} catch (e) {
+  puter = null;
 }
 
-async function puterRewrite(text) {
+async function puterRewrite(prompt) {
   if (!puter) throw new Error("Puter not initialized");
-  const model = process.env.PUTER_MODEL || "claude-sonnet-4-5";
-  const options = { model, stream: false, temperature: Number(process.env.PUTER_TEMPERATURE || 0.0) };
-  const resp = await puter.ai.chat(text, options);
-  if (typeof resp === "string") return resp;
-  if (resp?.message?.content && Array.isArray(resp.message.content) && resp.message.content[0]?.text) {
-    return resp.message.content[0].text;
+  
+  const model = process.env.PUTER_MODEL || "claude-3-5-sonnet";
+  const options = { 
+    model, 
+    stream: false, 
+    temperature: 0.3,
+    system: "You are an expert Hindi journalist. Always write in Hindi using Devanagari script."
+  };
+  
+  try {
+    const resp = await puter.ai.chat(prompt, options);
+    
+    if (typeof resp === "string") {
+      return resp;
+    } else if (resp?.message?.content) {
+      if (Array.isArray(resp.message.content) && resp.message.content[0]?.text) {
+        return resp.message.content[0].text;
+      } else if (typeof resp.message.content === "string") {
+        return resp.message.content;
+      }
+    } else if (resp?.text) {
+      return resp.text;
+    }
+    
+    return String(resp || "");
+  } catch (error) {
+    throw new Error(`Puter error: ${error.message}`);
   }
-  if (resp?.message?.content && typeof resp.message.content === "string") {
-    return resp.message.content;
-  }
-  if (resp?.text) return resp.text;
-  return String(resp);
 }
 
-/* -------------------- PROVIDER REGISTRY -------------------- */
+// Gemini
+async function geminiRewrite(prompt) {
+  if (!process.env.GEMINI_API_KEY || !process.env.GEMINI_ENDPOINT) {
+    throw new Error("Gemini not configured");
+  }
+  
+  const response = await fetch(process.env.GEMINI_ENDPOINT, {
+    method: "POST",
+    headers: { 
+      Authorization: `Bearer ${process.env.GEMINI_API_KEY}`, 
+      "Content-Type": "application/json" 
+    },
+    body: JSON.stringify({
+      contents: [{
+        parts: [{
+          text: `You are an expert Hindi journalist. Write a complete Hindi news article in Devanagari script.
+
+${prompt}
+
+Write only the Hindi article:`
+        }]
+      }],
+      generationConfig: {
+        maxOutputTokens: 800,
+        temperature: 0.3
+      }
+    }),
+    timeout: 30000
+  });
+
+  if (!response.ok) {
+    throw new Error(`Gemini API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  
+  if (!content) {
+    throw new Error("Gemini returned no content");
+  }
+  
+  return content;
+}
+
+/* -------------------- Provider Registry -------------------- */
 const providers = [
-  { name: "puter", fn: puterRewrite, enabled: !!puter },
-  { name: "huggingface", fn: hfRewrite, enabled: !!process.env.HUGGINGFACE_API_KEY },
-  { name: "deepseek", fn: deepseekRewrite, enabled: !!process.env.DEEPSEEK_API_KEY },
-  { name: "local_llama", fn: localLlamaRewrite, enabled: !!process.env.LOCAL_LLAMA_URL },
-  { name: "gemini", fn: geminiRewrite, enabled: !!(process.env.GEMINI_API_KEY && process.env.GEMINI_ENDPOINT) }
-].filter((p) => p.enabled);
+  { 
+    name: "deepseek", 
+    fn: deepseekRewrite, 
+    enabled: !!process.env.DEEPSEEK_API_KEY,
+    priority: 1
+  },
+  { 
+    name: "puter", 
+    fn: puterRewrite, 
+    enabled: !!puter,
+    priority: 2
+  },
+  { 
+    name: "gemini", 
+    fn: geminiRewrite, 
+    enabled: !!(process.env.GEMINI_API_KEY && process.env.GEMINI_ENDPOINT),
+    priority: 3
+  },
+  { 
+    name: "huggingface", 
+    fn: hfRewrite, 
+    enabled: !!process.env.HUGGINGFACE_API_KEY,
+    priority: 4
+  }
+].filter((p) => p.enabled).sort((a, b) => a.priority - b.priority);
 
-/* -------------------- ORCHESTRATION & HELPERS -------------------- */
+console.log("Active AI providers:", providers.map(p => p.name));
 
-// fetch the full article page and heuristically extract main text
+/* -------------------- Helper Functions -------------------- */
 async function fetchArticleBody(url) {
   try {
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const res = await fetch(url, { 
+      headers: { 
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0"
+      },
+      timeout: 10000
+    });
+    
     if (!res.ok) return null;
+    
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    // try common article selectors
+    // Try multiple selectors
     const selectors = [
       'article',
-      '.article-body', '.story-body', '.story-content',
-      '.entry-content', '.post-content', '.td-post-content',
-      '.news-detail', '.wp-block-post-content', '#content', '.ArticleBody', '.cn__content'
+      '.article-body',
+      '.story-body',
+      '.story-content',
+      '.entry-content',
+      '.post-content',
+      '.td-post-content',
+      '.news-detail',
+      '.wp-block-post-content',
+      '#content',
+      '.ArticleBody',
+      '.cn__content',
+      '.story-section',
+      '.article-container'
     ];
 
     for (const sel of selectors) {
       const el = $(sel).first();
-      if (el && el.text() && el.text().trim().length > 200) {
-        const txt = el.text().trim().replace(/\s{2,}/g, ' ');
-        if (txt.length > 200) return txt;
+      if (el.length && el.text().trim().length > 200) {
+        const text = el.text()
+          .trim()
+          .replace(/\s+/g, ' ')
+          .replace(/\n+/g, '\n');
+        
+        if (text.length > 300) return text;
       }
     }
 
-    // fallback: gather paragraph text
-    const paras = [];
-    $('p').each((i, p) => {
-      const t = $(p).text().trim();
-      if (t.length > 30) paras.push(t);
-      // limit collected size
-      if (paras.join("\n\n").length > 5000) return false;
+    // Fallback: get all paragraphs
+    const paragraphs = [];
+    $('p').each((i, elem) => {
+      const text = $(elem).text().trim();
+      if (text.length > 50 && !text.includes('©') && !text.includes('Copyright')) {
+        paragraphs.push(text);
+      }
     });
 
-    const joined = paras.join("\n\n").replace(/\s{2,}/g, ' ');
-    return joined.length > 200 ? joined : null;
+    const content = paragraphs.join('\n\n');
+    return content.length > 300 ? content : null;
   } catch (e) {
-    console.warn("fetchArticleBody failed for", url, e?.message || e);
+    console.warn(`Failed to fetch article body from ${url}:`, e.message);
     return null;
   }
 }
 
-// Build a Hindi-specific rewrite prompt that requests a new headline and article.
-function buildRewritePromptHindi({ sourceTitle, sourceUrl, sourceText }) {
-  const MIN = Number(process.env.MIN_AI_WORDS) || 300;
-  const MAX = Number(process.env.MAX_AI_WORDS) || 400;
-  return `You are an experienced Hindi news editor. IMPORTANT: **Only output the final result between the markers <<<START-OUTPUT>>> and <<<END-OUTPUT>>>. Do not repeat the prompt, do not include the source text, and do not include any system or debug text.**
-
-Task: Based on the source content below, produce a brand-new original Hindi headline and an original Hindi article of approximately ${MIN}-${MAX} words.
-
-Output format (ONLY this format):
-<<<START-OUTPUT>>>
-HEADLINE: <your new Hindi headline, not identical to source>
-
-<article body in Hindi, plain text, short paragraphs>
-<<<END-OUTPUT>>>
-
-Important rules:
-- Preserve factual information (names, dates, locations, quotes). Do NOT invent facts.
-- Output only plain text (no HTML, no Markdown).
-- Write entirely in Hindi using Devanagari script.
-- DO NOT include instructions or source material in the output.
-- Do NOT include any dates or timestamps in the article body.
-- Use short paragraphs for better readability.
-
-Source title: ${String(sourceTitle || "").trim()}
-Source URL: ${String(sourceUrl || "")}
-
-Source content:
-${String(sourceText || "").trim()}`;
-}
-
-// NEW: Improved AI response parser
 function parseAIResponse(aiOutput) {
   if (!aiOutput) return { title: "", content: "" };
   
-  const output = String(aiOutput).trim();
+  const text = aiOutput.trim();
   
-  // Debug: Log raw output for troubleshooting
-  console.log("Raw AI output:", output.substring(0, 500) + "...");
+  // Remove any HTML tags
+  let cleaned = text.replace(/<[^>]*>/g, '');
   
-  // Try to extract content between markers first
-  const startMarker = "<<<START-OUTPUT>>>";
-  const endMarker = "<<<END-OUTPUT>>>";
+  // Remove any markdown formatting
+  cleaned = cleaned.replace(/[*_~`#]/g, '');
   
-  const startIndex = output.indexOf(startMarker);
-  const endIndex = output.indexOf(endMarker);
+  // Remove common AI instruction artifacts
+  cleaned = cleaned.replace(/^(headline|title|शीर्षक|लेख):\s*/gi, '')
+                   .replace(/article body:/gi, '')
+                   .replace(/आर्टिकल:/gi, '')
+                   .replace(/न्यूज़ आर्टिकल:/gi, '')
+                   .replace(/समाचार:/gi, '')
+                   .replace(/^(यह|इस|आज|हमारे)\s+/gi, '')
+                   .trim();
   
-  if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
-    const contentBetween = output.substring(startIndex + startMarker.length, endIndex).trim();
-    
-    // Extract headline from content between markers
-    const headlineRegex = /HEADLINE:\s*(.+?)(?:\n\n|\r\n\r\n|\n\r\n\r)/;
-    const headlineMatch = contentBetween.match(headlineRegex);
-    
-    let title = "";
-    let article = contentBetween;
-    
-    if (headlineMatch && headlineMatch[1]) {
-      title = headlineMatch[1].trim();
-      // Remove the HEADLINE line and any following blank lines
-      article = contentBetween.replace(/HEADLINE:\s*.+(\r?\n){1,2}/, "").trim();
-    } else {
-      // Try alternative headline patterns
-      const altHeadlineMatch = contentBetween.match(/^(.*?)\n\n/);
-      if (altHeadlineMatch && altHeadlineMatch[1]) {
-        title = altHeadlineMatch[1].trim();
-        article = contentBetween.substring(altHeadlineMatch[0].length).trim();
-      } else {
-        // Use first non-empty line as title
-        const lines = contentBetween.split('\n').filter(line => line.trim().length > 0);
-        if (lines.length > 0) {
-          title = lines[0].trim();
-          article = lines.slice(1).join('\n').trim();
-        } else {
-          title = contentBetween;
-          article = contentBetween;
-        }
-      }
-    }
-    
-    // Clean up any remaining marker artifacts
-    title = title.replace(/<<<.*?>>>/g, '').trim();
-    article = article.replace(/<<<.*?>>>/g, '').trim();
-    
-    return { title, content: article };
-  }
-  
-  // Fallback: Look for HEADLINE anywhere in the output
-  const headlineMatch = output.match(/HEADLINE:\s*(.+)/i);
-  if (headlineMatch && headlineMatch[1]) {
-    const title = headlineMatch[1].trim().replace(/<<<.*?>>>/g, '');
-    const content = output.replace(/HEADLINE:\s*.+/i, "").replace(/<<<.*?>>>/g, '').trim();
-    return { title, content };
-  }
-  
-  // Last resort: Clean and use first line as title
-  const cleaned = output.replace(/<<<.*?>>>/g, '').trim();
+  // Find the first line as potential title
   const lines = cleaned.split('\n').filter(line => line.trim().length > 0);
   
   if (lines.length === 0) {
     return { title: "", content: "" };
   }
   
+  // First non-empty line is the title
   const title = lines[0].trim();
-  const content = lines.length > 1 ? lines.slice(1).join('\n').trim() : title;
+  
+  // Rest is content
+  const content = lines.slice(1).join('\n\n').trim();
+  
+  // If no content, use title as content
+  if (!content && title) {
+    return { title: title, content: title };
+  }
   
   return { title, content };
 }
 
-function withTimeout(promise, ms, name) {
-  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${ms}ms (${name})`)), ms));
-  return Promise.race([promise, timeout]);
+function countWords(text) {
+  if (!text) return 0;
+  // Count words in Hindi/English
+  return text.trim().split(/\s+/).filter(word => word.length > 0).length;
 }
 
-function countWords(s) {
-  if (!s) return 0;
-  // Count Hindi and English words
-  return String(s).trim().split(/[\s\u200B-\u200D\uFEFF]+/).filter(Boolean).length;
-}
+/* -------------------- Main AI Rewrite Function -------------------- */
+async function rewriteWithAI(sourceTitle, sourceText) {
+  if (providers.length === 0) {
+    throw new Error("No AI providers available");
+  }
 
-async function attemptRewriteOnce(prompt, timeoutMs) {
-  if (!providers.length) throw new Error("No providers configured");
-  const attempts = providers.map((p) =>
-    withTimeout(
-      (async () => {
-        await sleep(Math.floor(Math.random() * 80));
-        const out = await p.fn(prompt);
-        if (!out || String(out).trim().length < 10) throw new Error("empty output");
-        return { text: String(out).trim(), provider: p.name };
-      })(),
-      timeoutMs,
-      p.name
-    )
-  );
-  const result = await Promise.any(attempts);
-  return result;
-}
-
-// rewriteWithParallel: tries providers in parallel; enforces word count; retries if necessary
-async function rewriteWithParallel(prompt) {
-  if (!providers.length) return { text: prompt, provider: null, timed_out: false };
-
-  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 30000;
-  const RETRIES = Number(process.env.PROVIDER_RETRY_COUNT) || 2;
-  const MIN_WORDS = Number(process.env.MIN_AI_WORDS) || 300;
-  const MAX_WORDS = Number(process.env.MAX_AI_WORDS) || 400;
-
-  let lastError = null;
-
-  for (let attempt = 0; attempt <= RETRIES; attempt++) {
+  const prompt = buildRewritePromptHindi({ sourceTitle, sourceText });
+  
+  // Try each provider in order
+  for (const provider of providers) {
     try {
-      const promptToSend = attempt === 0 ? prompt : prompt + `\n\nReminder: Write approximately ${MIN_WORDS}-${MAX_WORDS} words in Hindi and include HEADLINE: as described. Output ONLY between <<<START-OUTPUT>>> and <<<END-OUTPUT>>> markers.`;
-      const result = await attemptRewriteOnce(promptToSend, TIMEOUT_MS);
-      const out = result?.text || "";
+      console.log(`Trying provider: ${provider.name}`);
       
-      // Parse the AI response
-      const parsed = parseAIResponse(out);
-      const content = parsed.content;
-      const wc = countWords(content);
-
-      if (wc >= MIN_WORDS && wc <= MAX_WORDS) {
-        return { 
-          text: out, 
-          parsed: parsed,
-          provider: result.provider, 
-          timed_out: false, 
-          words: wc, 
-          attempts: attempt + 1 
-        };
+      const aiOutput = await provider.fn(prompt);
+      
+      if (!aiOutput || aiOutput.trim().length < 100) {
+        console.warn(`Provider ${provider.name} returned empty/short output`);
+        continue;
       }
-
-      // If last attempt, accept if reasonably long (>200 words)
-      if (attempt === RETRIES) {
-        return { 
-          text: out, 
-          parsed: parsed,
-          provider: result.provider, 
-          timed_out: false, 
-          words: wc, 
-          attempts: attempt + 1, 
-          note: "final-accept" 
-        };
+      
+      console.log(`Raw AI output from ${provider.name} (first 200 chars):`, aiOutput.substring(0, 200));
+      
+      const parsed = parseAIResponse(aiOutput);
+      
+      if (!parsed.content || parsed.content.length < 200) {
+        console.warn(`Provider ${provider.name} returned insufficient content`);
+        continue;
       }
-
-      lastError = new Error(`provider ${result.provider} returned ${wc} words (out of ${MIN_WORDS}-${MAX_WORDS}), retrying`);
-      console.warn(lastError.message);
-      await sleep(500 + Math.floor(Math.random() * 500));
-    } catch (err) {
-      lastError = err;
-      console.warn("Rewrite attempt failed:", err && err.message ? err.message : err);
-      await sleep(500 + Math.floor(Math.random() * 500));
+      
+      const wordCount = countWords(parsed.content);
+      
+      if (wordCount < 100) {
+        console.warn(`Provider ${provider.name} returned only ${wordCount} words`);
+        continue;
+      }
+      
+      console.log(`Success with ${provider.name}: ${wordCount} words`);
+      
+      return {
+        success: true,
+        title: parsed.title || sourceTitle,
+        content: parsed.content,
+        provider: provider.name,
+        wordCount
+      };
+      
+    } catch (error) {
+      console.warn(`Provider ${provider.name} failed:`, error.message);
+      // Try next provider
+      continue;
     }
   }
-
-  return { 
-    text: prompt, 
-    parsed: { title: "", content: "" },
-    provider: null, 
-    timed_out: true, 
-    error: lastError 
-  };
+  
+  throw new Error("All AI providers failed");
 }
 
-/* -------------------- RSS DISCOVERY & FETCHERS -------------------- */
-async function discoverRSS(html, baseUrl) {
-  try {
-    const $ = cheerio.load(html);
-    const link = $('link[type="application/rss+xml"]').attr("href");
-    if (link) return new URL(link, baseUrl).href;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// Accept language param (e.g., 'hi' for Hindi)
-async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 10, lang = "hi") {
-  if (!process.env.NEWSAPI_KEY) return [];
-  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&pageSize=${pageSize}&language=${lang}&sortBy=publishedAt&apiKey=${process.env.NEWSAPI_KEY}`;
-  const r = await fetch(url);
-  const j = await r.json();
-  if (!j.articles) return [];
-  return j.articles.map((a) => ({
-    title: a.title,
-    link: a.url,
-    pubDate: a.publishedAt,
-    description: a.description || "",
-    image: a.urlToImage || null,
-    source: a.source?.name || null
-  }));
-}
-
-async function fetchFromGNews(q = "uttarakhand", max = 10, lang = "hi") {
-  if (!process.env.GNEWS_KEY) return [];
-  const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&token=${process.env.GNEWS_KEY}&lang=${lang}&max=${max}`;
-  const r = await fetch(url);
-  const j = await r.json();
-  if (!j.articles) return [];
-  return j.articles.map((a) => ({
-    title: a.title,
-    link: a.url,
-    pubDate: a.publishedAt,
-    description: a.description || "",
-    image: a.image || null,
-    source: a.source?.name || null
-  }));
-}
-
-/* -------------------- PROCESS API SOURCES -------------------- */
+/* -------------------- Process Functions -------------------- */
 async function processApiSources(region) {
-  const q =
-    region === "uttarakhand"
-      ? "uttarakhand OR dehradun OR nainital OR champawat OR haridwar"
-      : region === "india"
-      ? "india OR delhi OR mumbai"
-      : "international";
-  const all = [];
-
-  // prefer Hindi for Uttarakhand/India
-  const lang = region === "international" ? "en" : "hi";
-
+  const sources = [];
+  
+  // NewsAPI
   if (process.env.NEWSAPI_KEY) {
     try {
-      all.push(...(await fetchFromNewsAPI(q, 10, lang)));
-    } catch (e) {
-      console.warn("NewsAPI fail", e.message || e);
+      const lang = region === "international" ? "en" : "hi";
+      let query = "";
+      
+      if (region === "uttarakhand") {
+        query = "uttarakhand OR dehradun OR nainital OR haridwar";
+      } else if (region === "india") {
+        query = "india OR delhi OR mumbai";
+      } else {
+        query = "world news";
+      }
+      
+      const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&language=${lang}&pageSize=5&apiKey=${process.env.NEWSAPI_KEY}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (data.articles) {
+        sources.push(...data.articles.map(article => ({
+          title: article.title,
+          url: article.url,
+          description: article.description,
+          image: article.urlToImage,
+          publishedAt: article.publishedAt,
+          source: article.source?.name
+        })));
+      }
+    } catch (error) {
+      console.warn("NewsAPI error:", error.message);
     }
   }
+  
+  // GNews
   if (process.env.GNEWS_KEY) {
     try {
-      all.push(...(await fetchFromGNews(q, 10, lang)));
-    } catch (e) {
-      console.warn("GNews fail", e.message || e);
+      const lang = region === "international" ? "en" : "hi";
+      let query = "";
+      
+      if (region === "uttarakhand") {
+        query = "uttarakhand";
+      } else if (region === "india") {
+        query = "india";
+      } else {
+        query = "world";
+      }
+      
+      const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(query)}&lang=${lang}&max=5&token=${process.env.GNEWS_KEY}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (data.articles) {
+        sources.push(...data.articles.map(article => ({
+          title: article.title,
+          url: article.url,
+          description: article.description,
+          image: article.image,
+          publishedAt: article.publishedAt,
+          source: article.source?.name
+        })));
+      }
+    } catch (error) {
+      console.warn("GNews error:", error.message);
     }
   }
-
-  for (const item of all.slice(0, 20)) {
+  
+  // Process each source
+  for (const item of sources.slice(0, 10)) {
     enqueueTask(async () => {
       try {
-        const url = item.link;
-        if (!url) return;
-        const { data: existing } = await supabase.from("ai_news").select("id").eq("source_url", url).limit(1).maybeSingle();
+        if (!item.url) return;
+        
+        // Check if already exists
+        const { data: existing } = await supabase
+          .from("ai_news")
+          .select("id")
+          .eq("source_url", item.url)
+          .limit(1)
+          .maybeSingle();
+          
         if (existing) {
-          console.log("Skipping existing:", url);
+          console.log(`Skipping existing: ${item.url}`);
           return;
         }
-
-        const titleOrig = item.title || "No title";
-
-        // fetch fuller body
-        let fetchedBody = null;
+        
+        console.log(`Processing: ${item.title?.substring(0, 50)}...`);
+        
+        // Get article content
+        let articleText = "";
         try {
-          fetchedBody = await fetchArticleBody(url);
+          const fetched = await fetchArticleBody(item.url);
+          articleText = fetched || item.description || item.title || "";
         } catch (e) {
-          fetchedBody = null;
+          articleText = item.description || item.title || "";
         }
-
-        const sourceSnippet = (item.description || "").trim();
-        const contextForAI = (fetchedBody && fetchedBody.length > 200) ? fetchedBody : sourceSnippet || titleOrig;
-
-        const prompt = buildRewritePromptHindi({ sourceTitle: titleOrig, sourceUrl: url, sourceText: contextForAI });
-
-        const aiResult = await rewriteWithParallel(prompt);
-        const aiOut = aiResult.text;
-        const providerUsed = aiResult.provider;
-        const parsed = aiResult.parsed;
-
-        // Use parsed content
-        let finalTitle = parsed.title || titleOrig;
-        let finalContent = parsed.content || aiOut || "";
-
-        // Clean up any remaining English instructions
-        finalContent = finalContent.replace(/HEADLINE:.*/gi, '')
-                                   .replace(/<<<.*?>>>/g, '')
-                                   .replace(/You are an experienced.*/gi, '')
-                                   .replace(/Task:.*/gi, '')
-                                   .replace(/Output format:.*/gi, '')
-                                   .replace(/Important rules:.*/gi, '')
-                                   .replace(/Source title:.*/gi, '')
-                                   .replace(/Source URL:.*/gi, '')
-                                   .replace(/Source content:.*/gi, '')
-                                   .trim();
-
-        // If title is still empty or too short, create one from content
-        if (!finalTitle || finalTitle.length < 5) {
-          const firstSentence = finalContent.split(/[।.!?]/)[0] || finalContent.substring(0, 100);
-          finalTitle = firstSentence.trim();
+        
+        if (!articleText || articleText.length < 100) {
+          console.warn(`Insufficient content for: ${item.url}`);
+          return;
         }
-
-        let genre = "Other";
-        if (process.env.HUGGINGFACE_API_KEY) {
-          try {
-            const cModel = process.env.HF_CLASS_MODEL || "facebook/bart-large-mnli";
-            const cUrl = `https://api-inference.huggingface.co/models/${cModel}`;
-            const cr = await fetch(cUrl, {
-              method: "POST",
-              headers: { Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ inputs: finalContent, parameters: { candidate_labels: GENRE_CANDIDATES.slice(0, 10), multi_label: false } })
-            });
-            const cj = await cr.json();
-            if (cj?.labels && cj.labels.length) genre = cj.labels[0];
-          } catch (e) {
-            genre = detectGenreKeyword(finalContent);
-          }
-        } else genre = detectGenreKeyword(finalContent);
-
-        const sourceHost = (url && new URL(url).hostname) || "";
-        const regionDetected = detectRegionFromText(`${finalTitle}\n${finalContent}`, sourceHost);
-
+        
+        // Get AI rewrite
+        const aiResult = await rewriteWithAI(item.title || "Untitled", articleText);
+        
+        if (!aiResult.success) {
+          console.warn(`AI rewrite failed for: ${item.url}`);
+          return;
+        }
+        
+        // Detect genre
+        let genre = detectGenreKeyword(aiResult.content);
+        
+        // Detect region
+        const sourceHost = new URL(item.url).hostname;
+        const regionDetected = detectRegionFromText(`${aiResult.title}\n${aiResult.content}`, sourceHost);
+        
+        // Create record
         const record = {
-          title: finalTitle,
-          slug: makeSlug(finalTitle),
-          source_url: url,
-          ai_content: finalContent,
-          short_desc: (finalContent || "").slice(0, 220) + "...",
-          image_url: item.image || null,
-          published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
+          title: aiResult.title,
+          slug: makeSlug(aiResult.title),
+          source_url: item.url,
+          ai_content: aiResult.content,
+          short_desc: aiResult.content.substring(0, 200) + "...",
+          image_url: item.image,
+          published_at: item.publishedAt ? new Date(item.publishedAt).toISOString() : new Date().toISOString(),
           region: regionDetected,
-          genre,
-          meta: { 
-            raw: item, 
-            ai_provider: providerUsed,
-            original_title: titleOrig,
-            parsed_success: !!(parsed.title && parsed.content)
+          genre: genre,
+          meta: {
+            original_title: item.title,
+            source: item.source,
+            ai_provider: aiResult.provider,
+            word_count: aiResult.wordCount
           }
         };
-
+        
+        // Save to database
         const { error } = await supabase.from("ai_news").insert(record);
+        
         if (error) {
-          console.warn("Insert error (API):", error.message || error);
+          console.warn(`Database insert error:`, error.message);
         } else {
-          console.log("✅ Inserted (API):", finalTitle.substring(0, 60), "via", providerUsed, `(${countWords(finalContent)} words)`);
-          console.log("   Parsed successfully:", !!(parsed.title && parsed.content));
+          console.log(`✅ Inserted: ${aiResult.title.substring(0, 60)} via ${aiResult.provider} (${aiResult.wordCount} words)`);
         }
-      } catch (err) {
-        console.warn("API item processing error:", err.message || err);
+        
+      } catch (error) {
+        console.warn(`Error processing item:`, error.message);
       }
     });
   }
 }
 
-/* -------------------- PROCESS RSS FEEDS -------------------- */
 async function processFeeds(feedList, region) {
-  for (const feed of feedList) {
+  for (const feedUrl of feedList) {
     try {
-      const res = await fetch(feed, { headers: { "User-Agent": "Mozilla/5.0" } });
-      let text = await res.text();
-      if (text.includes("<html")) {
-        const realFeed = await discoverRSS(text, feed);
-        if (!realFeed) continue;
-        const realRes = await fetch(realFeed);
-        text = await realRes.text();
+      console.log(`Processing feed: ${feedUrl}`);
+      
+      const response = await fetch(feedUrl, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+        timeout: 10000
+      });
+      
+      if (!response.ok) {
+        console.warn(`Failed to fetch feed: ${feedUrl}`);
+        continue;
       }
-      text = sanitizeXml(text);
-      const rss = await parser.parseString(text);
-      if (!rss.items) continue;
-
-      for (const item of rss.items.slice(0, 8)) {
+      
+      let xmlText = await response.text();
+      xmlText = sanitizeXml(xmlText);
+      
+      const feed = await parser.parseString(xmlText);
+      
+      if (!feed.items || feed.items.length === 0) {
+        console.warn(`No items in feed: ${feedUrl}`);
+        continue;
+      }
+      
+      for (const item of feed.items.slice(0, 5)) {
         enqueueTask(async () => {
           try {
             const url = item.link || item.guid;
             if (!url) return;
-            const { data: existing } = await supabase.from("ai_news").select("id").eq("source_url", url).limit(1).maybeSingle();
+            
+            // Check if already exists
+            const { data: existing } = await supabase
+              .from("ai_news")
+              .select("id")
+              .eq("source_url", url)
+              .limit(1)
+              .maybeSingle();
+              
             if (existing) {
-              console.log("Skipping existing RSS:", url);
+              console.log(`Skipping existing RSS: ${url}`);
               return;
             }
-
-            let image = item.enclosure?.url || item["media:content"]?.url || null;
-            const titleOrig = item.title || "No title";
-
-            // fetch fuller body
-            let fetchedBody = null;
+            
+            console.log(`Processing RSS: ${item.title?.substring(0, 50)}...`);
+            
+            // Get article content
+            let articleText = "";
             try {
-              fetchedBody = await fetchArticleBody(url);
+              const fetched = await fetchArticleBody(url);
+              articleText = fetched || item.contentSnippet || item.description || item.title || "";
             } catch (e) {
-              fetchedBody = null;
+              articleText = item.contentSnippet || item.description || item.title || "";
             }
-
-            const sourceSnippet = (item.contentSnippet || item.content || item.description || "").trim();
-            const contextForAI = (fetchedBody && fetchedBody.length > 200) ? fetchedBody : sourceSnippet || titleOrig;
-
-            const prompt = buildRewritePromptHindi({ sourceTitle: titleOrig, sourceUrl: url, sourceText: contextForAI });
-
-            const aiResult = await rewriteWithParallel(prompt);
-            const aiText = aiResult.text;
-            const providerUsed = aiResult.provider;
-            const parsed = aiResult.parsed;
-
-            // Use parsed content
-            let finalTitle = parsed.title || titleOrig;
-            let finalContent = parsed.content || aiText || "";
-
-            // Clean up any remaining English instructions
-            finalContent = finalContent.replace(/HEADLINE:.*/gi, '')
-                                       .replace(/<<<.*?>>>/g, '')
-                                       .replace(/You are an experienced.*/gi, '')
-                                       .replace(/Task:.*/gi, '')
-                                       .replace(/Output format:.*/gi, '')
-                                       .replace(/Important rules:.*/gi, '')
-                                       .replace(/Source title:.*/gi, '')
-                                       .replace(/Source URL:.*/gi, '')
-                                       .replace(/Source content:.*/gi, '')
-                                       .trim();
-
-            // If title is still empty or too short, create one from content
-            if (!finalTitle || finalTitle.length < 5) {
-              const firstSentence = finalContent.split(/[।.!?]/)[0] || finalContent.substring(0, 100);
-              finalTitle = firstSentence.trim();
+            
+            if (!articleText || articleText.length < 100) {
+              console.warn(`Insufficient content for RSS: ${url}`);
+              return;
             }
-
-            let genre = "Other";
-            if (process.env.HUGGINGFACE_API_KEY) {
-              try {
-                const cModel = process.env.HF_CLASS_MODEL || "facebook/bart-large-mnli";
-                const cUrl = `https://api-inference.huggingface.co/models/${cModel}`;
-                const cr = await fetch(cUrl, {
-                  method: "POST",
-                  headers: { Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({ inputs: finalContent, parameters: { candidate_labels: GENRE_CANDIDATES.slice(0, 10), multi_label: false } })
-                });
-                const cj = await cr.json();
-                if (cj?.labels && cj.labels.length) genre = cj.labels[0];
-              } catch (e) {
-                genre = detectGenreKeyword(finalContent);
-              }
-            } else genre = detectGenreKeyword(finalContent);
-
-            const sourceHost = (url && new URL(url).hostname) || "";
-            const regionDetected = detectRegionFromText(`${finalTitle}\n${finalContent}`, sourceHost);
-
+            
+            // Get AI rewrite
+            const aiResult = await rewriteWithAI(item.title || "Untitled", articleText);
+            
+            if (!aiResult.success) {
+              console.warn(`AI rewrite failed for RSS: ${url}`);
+              return;
+            }
+            
+            // Detect genre
+            let genre = detectGenreKeyword(aiResult.content);
+            
+            // Detect region
+            const sourceHost = new URL(url).hostname;
+            const regionDetected = detectRegionFromText(`${aiResult.title}\n${aiResult.content}`, sourceHost);
+            
+            // Get image
+            let image = null;
+            if (item.enclosure?.url) {
+              image = item.enclosure.url;
+            } else if (item["media:content"]?.url) {
+              image = item["media:content"].url;
+            }
+            
+            // Create record
             const record = {
-              title: finalTitle,
-              slug: makeSlug(finalTitle),
+              title: aiResult.title,
+              slug: makeSlug(aiResult.title),
               source_url: url,
-              ai_content: finalContent,
-              short_desc: (finalContent || "").slice(0, 220) + "...",
+              ai_content: aiResult.content,
+              short_desc: aiResult.content.substring(0, 200) + "...",
               image_url: image,
               published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
               region: regionDetected,
-              genre,
-              meta: { 
-                raw: item, 
-                ai_provider: providerUsed,
-                original_title: titleOrig,
-                parsed_success: !!(parsed.title && parsed.content)
+              genre: genre,
+              meta: {
+                original_title: item.title,
+                source: feed.title,
+                ai_provider: aiResult.provider,
+                word_count: aiResult.wordCount
               }
             };
-
+            
+            // Save to database
             const { error } = await supabase.from("ai_news").insert(record);
+            
             if (error) {
-              console.warn("Insert error (RSS):", error.message || error);
+              console.warn(`Database insert error for RSS:`, error.message);
             } else {
-              console.log("✅ Inserted (RSS):", finalTitle.substring(0, 60), "via", providerUsed, `(${countWords(finalContent)} words)`);
-              console.log("   Parsed successfully:", !!(parsed.title && parsed.content));
+              console.log(`✅ Inserted RSS: ${aiResult.title.substring(0, 60)} via ${aiResult.provider} (${aiResult.wordCount} words)`);
             }
-          } catch (e) {
-            console.warn("RSS item error:", e.message || e);
+            
+          } catch (error) {
+            console.warn(`Error processing RSS item:`, error.message);
           }
         });
       }
-    } catch (e) {
-      console.warn(`Feed error (${region}):`, e.message || e);
+      
+    } catch (error) {
+      console.warn(`Error processing feed ${feedUrl}:`, error.message);
     }
   }
 }
 
-/* -------------------- CLEANUP -------------------- */
+/* -------------------- Cleanup -------------------- */
 async function cleanupOldArticles(days = 7) {
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    console.warn("Skipping cleanup: SUPABASE_SERVICE_ROLE_KEY required.");
-    return;
-  }
   try {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    const { data, error } = await supabase.from("ai_news").delete().lt("created_at", cutoff);
-    if (error) console.warn("Cleanup delete error:", error.message || error);
-    else console.log(`Cleanup done. Deleted ${data ? data.length : 0} rows older than ${cutoff}`);
-  } catch (e) {
-    console.warn("Cleanup error:", e.message || e);
+    const { error } = await supabase
+      .from("ai_news")
+      .delete()
+      .lt("created_at", cutoff);
+      
+    if (error) {
+      console.warn("Cleanup error:", error.message);
+    } else {
+      console.log(`Cleanup completed for articles older than ${cutoff}`);
+    }
+  } catch (error) {
+    console.warn("Cleanup error:", error.message);
   }
 }
 
-/* -------------------- BOOTSTRAP & SCHEDULE -------------------- */
+/* -------------------- Schedule -------------------- */
+// Initial run after 5 seconds
 setTimeout(async () => {
   try {
-    console.log("🚀 Initial run starting on Render...");
-    console.log("Available AI providers:", providers.map(p => p.name));
+    console.log("🚀 Starting initial run...");
     
+    // Run sequentially to avoid overwhelming
     await processApiSources("uttarakhand");
+    await sleep(2000);
+    
     await processFeeds(UTTRAKHAND_FEEDS, "uttarakhand");
+    await sleep(2000);
+    
     await processApiSources("india");
+    await sleep(2000);
+    
     await processFeeds(INDIA_FEEDS, "india");
+    await sleep(2000);
+    
     await processApiSources("international");
+    await sleep(2000);
+    
     await cleanupOldArticles(Number(process.env.CLEANUP_DAYS) || 7);
-    console.log("✅ Initial run completed on Render");
-  } catch (e) {
-    console.error("Bootstrap error:", e.message || e);
+    
+    console.log("✅ Initial run completed");
+  } catch (error) {
+    console.error("Initial run error:", error.message);
   }
-}, 10000);
+}, 5000);
 
-const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 15;
+// Periodic runs
+const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 30;
 setInterval(async () => {
   try {
-    console.log(`🔄 Periodic run started on Render (every ${POLL_MINUTES} minutes)`);
-    await processApiSources("uttarakhand");
-    await processFeeds(UTTRAKHAND_FEEDS, "uttarakhand");
-    await processApiSources("india");
-    await processFeeds(INDIA_FEEDS, "india");
-    await processApiSources("international");
-    console.log("✅ Periodic run completed on Render");
-  } catch (e) {
-    console.warn("Periodic run error:", e.message || e);
+    console.log(`🔄 Starting periodic run (every ${POLL_MINUTES} minutes)`);
+    
+    // Run one region at a time to be gentle on APIs
+    const regions = ["uttarakhand", "india", "international"];
+    
+    for (const region of regions) {
+      await processApiSources(region);
+      await sleep(30000); // Wait 30 seconds between regions
+      
+      if (region === "uttarakhand") {
+        await processFeeds(UTTRAKHAND_FEEDS, region);
+        await sleep(10000);
+      } else if (region === "india") {
+        await processFeeds(INDIA_FEEDS, region);
+        await sleep(10000);
+      }
+    }
+    
+    console.log("✅ Periodic run completed");
+  } catch (error) {
+    console.warn("Periodic run error:", error.message);
   }
 }, POLL_MINUTES * 60 * 1000);
 
+// Cleanup every 12 hours
 const CLEANUP_HOURS = Number(process.env.CLEANUP_INTERVAL_HOURS) || 12;
 setInterval(async () => {
-  console.log("🧹 Running cleanup on Render...");
+  console.log("🧹 Running cleanup...");
   await cleanupOldArticles(Number(process.env.CLEANUP_DAYS) || 7);
 }, CLEANUP_HOURS * 60 * 60 * 1000);
 
-/* -------------------- HTTP API -------------------- */
+/* -------------------- API Routes -------------------- */
 app.get("/api/news", async (req, res) => {
   try {
     const { limit = 30, genre, region, page = 1 } = req.query;
@@ -935,20 +950,20 @@ app.get("/api/news", async (req, res) => {
     const pageNum = Math.max(Number(page), 1);
     const offset = (pageNum - 1) * pageSize;
 
-    let qb = supabase
+    let query = supabase
       .from("ai_news")
       .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at", { count: "exact" })
       .order("created_at", { ascending: false })
       .range(offset, offset + pageSize - 1);
 
-    if (genre) qb = qb.eq("genre", genre);
-    if (region) qb = qb.eq("region", region);
+    if (genre && genre !== "All") query = query.eq("genre", genre);
+    if (region && region !== "All") query = query.eq("region", region);
 
-    const { data, error, count } = await qb;
+    const { data, error, count } = await query;
 
     if (error) {
       console.error("Database error:", error);
-      return res.status(500).json({ error: "Database error", message: error.message });
+      return res.status(500).json({ error: "Database error" });
     }
 
     res.json({
@@ -962,18 +977,26 @@ app.get("/api/news", async (req, res) => {
     });
   } catch (error) {
     console.error("API error:", error);
-    res.status(500).json({ error: "Server error", message: error.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 app.get("/api/news/:slug", async (req, res) => {
   try {
-    const { data, error } = await supabase.from("ai_news").select("*").eq("slug", req.params.slug).single();
-    if (error || !data) return res.status(404).json({ error: "Article not found" });
+    const { data, error } = await supabase
+      .from("ai_news")
+      .select("*")
+      .eq("slug", req.params.slug)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: "Article not found" });
+    }
+
     res.json(data);
   } catch (error) {
     console.error("API error:", error);
-    res.status(500).json({ error: "Server error", message: error.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
@@ -991,102 +1014,79 @@ app.get("/api/search", async (req, res) => {
 
     if (error) {
       console.error("Database error:", error);
-      return res.status(500).json({ error: "Database error", message: error.message });
+      return res.status(500).json({ error: "Database error" });
     }
 
     res.json({ data: data || [] });
   } catch (error) {
     console.error("API error:", error);
-    res.status(500).json({ error: "Server error", message: error.message });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-/* -------------------- HEALTH & ROOT -------------------- */
 app.get("/health", (req, res) => {
-  const health = {
+  res.json({
     status: "healthy",
     timestamp: new Date().toISOString(),
     service: "AI News Aggregator",
-    deployment: "Render",
-    url: process.env.PUBLIC_URL || "https://rt-india.onrender.com",
-    providers: providers.map((p) => p.name),
+    providers: providers.map(p => p.name),
     queue: {
       running,
       pending: queue.length,
       maxConcurrent: MAX_CONCURRENT
-    },
-    environment: process.env.NODE_ENV || "development"
-  };
-  res.status(200).json(health);
+    }
+  });
 });
 
 app.get("/", (req, res) => {
   res.json({
     message: "AI News Aggregator API",
-    version: "2.0.0",
-    deployment: "Render",
+    version: "3.0.0",
     endpoints: {
       news: "/api/news",
-      singleArticle: "/api/news/:slug",
+      article: "/api/news/:slug",
       search: "/api/search",
       health: "/health"
-    },
-    status: "operational",
-    documentation: "See /health for system status",
-    features: "Hindi news generation with AI rewriting"
+    }
   });
 });
 
-/* -------------------- ERROR HANDLING -------------------- */
-app.use((err, req, res, next) => {
-  console.error("Server error:", err);
-  if (err && err.message && err.message.includes("CORS")) {
-    return res.status(403).json({
-      error: "CORS Error",
-      message: err.message,
-      allowedOrigins,
-      allowAll,
-      allowCredentials
-    });
-  }
-  res.status(500).json({
-    error: "Internal Server Error",
-    message: process.env.NODE_ENV === "production" ? "Something went wrong" : err.message,
-    timestamp: new Date().toISOString()
-  });
-});
-
+/* -------------------- Error Handling -------------------- */
 app.use((req, res) => {
   res.status(404).json({
-    error: "Route not found",
+    error: "Not found",
     path: req.path,
-    method: req.method,
-    timestamp: new Date().toISOString()
+    method: req.method
   });
 });
 
-/* -------------------- START & GRACEFUL SHUTDOWN -------------------- */
+app.use((err, req, res, next) => {
+  console.error("Server error:", err);
+  res.status(500).json({
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "production" ? "Something went wrong" : err.message
+  });
+});
+
+/* -------------------- Start Server -------------------- */
 const PORT = process.env.PORT || 10000;
 
 process.on("SIGTERM", () => {
-  console.log("SIGTERM signal received: closing HTTP server");
+  console.log("SIGTERM received, shutting down gracefully");
   process.exit(0);
 });
+
 process.on("SIGINT", () => {
-  console.log("SIGINT signal received: closing HTTP server");
+  console.log("SIGINT received, shutting down gracefully");
   process.exit(0);
 });
 
 app.listen(PORT, () => {
-  console.log("✅ AI News Backend Running on Render");
-  console.log(`📍 URL: ${process.env.PUBLIC_URL || "https://rt-india.onrender.com"}`);
-  console.log(`🚪 Port: ${PORT}`);
-  console.log(`🌍 CORS: allowAll=${allowAll} | allowCredentials=${allowCredentials}`);
-  console.log(`🔒 Allowed origins: ${allowAll ? "ALL" : allowedOrigins.join(", ")}`);
+  console.log("✅ AI News Backend Running");
+  console.log(`📍 Port: ${PORT}`);
+  console.log(`🌍 CORS Origins: ${allowAll ? "ALL" : allowedOrigins.length} origins`);
+  console.log(`🤖 AI Providers: ${providers.length > 0 ? providers.map(p => p.name).join(", ") : "NONE (check API keys)"}`);
   console.log(`⏰ Poll Interval: ${POLL_MINUTES} minutes`);
-  console.log(`🧹 Cleanup Interval: ${CLEANUP_HOURS} hours`);
-  console.log(`🤖 Providers: ${providers.map((p) => p.name).join(", ")}`);
-  console.log(`📝 Word count: ${process.env.MIN_AI_WORDS || 300}-${process.env.MAX_AI_WORDS || 400} words`);
+  console.log(`🧹 Cleanup: Every ${CLEANUP_HOURS} hours`);
+  console.log("🚀 Server ready!");
 });
-
-/* -------------------- END -------------------- */
