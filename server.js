@@ -1,4 +1,4 @@
-// server.js - OPENROUTER + GROQ PARALLEL VERSION WITH ENHANCED IMAGE FETCHING
+// server.js - ENHANCED VERSION WITH NEWSAPI + GNEWS PRIORITY SYSTEM
 require("dotenv").config();
 
 const express = require("express");
@@ -82,7 +82,81 @@ const parser = new RSSParser({
 /* -------------------- Supabase -------------------- */
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-/* -------------------- Feeds -------------------- */
+/* -------------------- NEWS API CONFIGURATION -------------------- */
+const NEWS_SOURCES = {
+  // PRIORITY 1: UTTARAKHAND NEWS (Highest Priority)
+  UTTARAKHAND_NEWS18: {
+    priority: 1,
+    name: "News18 Uttarakhand",
+    type: "RSS",
+    config: {
+      url: "https://hindi.news18.com/rss/uttarakhand/",
+      maxItems: 10
+    }
+  },
+  
+  UTTARAKHAND_GNEWS: {
+    priority: 2,
+    name: "GNews Uttarakhand",
+    type: "GNEWS",
+    config: {
+      q: "Uttarakhand OR उत्तराखंड",
+      lang: "hi",
+      country: "in",
+      max: 8
+    }
+  },
+  
+  // PRIORITY 2: NATIONAL INDIA NEWS
+  INDIA_NEWSAPI: {
+    priority: 3,
+    name: "India National",
+    type: "NEWSAPI",
+    config: {
+      q: "India OR भारत",
+      language: "en",
+      pageSize: 10,
+      sortBy: "publishedAt"
+    }
+  },
+  
+  INDIA_GNEWS: {
+    priority: 4,
+    name: "India Hindi News",
+    type: "GNEWS",
+    config: {
+      q: "India hindi",
+      lang: "hi",
+      country: "in",
+      max: 8
+    }
+  },
+  
+  // PRIORITY 3: INTERNATIONAL NEWS
+  INTERNATIONAL_GNEWS: {
+    priority: 5,
+    name: "International News",
+    type: "GNEWS",
+    config: {
+      q: "world international",
+      lang: "en",
+      max: 6
+    }
+  },
+  
+  INTERNATIONAL_NEWSAPI: {
+    priority: 6,
+    name: "World News",
+    type: "NEWSAPI",
+    config: {
+      q: "world",
+      language: "en",
+      pageSize: 6
+    }
+  }
+};
+
+// Legacy RSS feeds (fallback if APIs fail)
 const UTTRAKHAND_FEEDS = [
   "https://www.amarujala.com/rss/uttarakhand.xml",
   "https://zeenews.india.com/hindi/rss/state/uttarakhand.xml"
@@ -210,6 +284,207 @@ function detectGenreKeyword(text) {
   if (/\b(food|travel|fashion|lifestyle|culture|भोजन|यात्रा|फैशन|संस्कृति)\b/.test(t)) return "Lifestyle";
   if (/\b(weather|rain|storm|flood|temperature|मौसम|बारिश|तूफान|बाढ़)\b/.test(t)) return "Weather";
   return "Other";
+}
+
+/* -------------------- NEWS API FUNCTIONS -------------------- */
+
+// 1. NEWSAPI.org Integration
+async function fetchFromNewsAPI(params) {
+  try {
+    const { q, language, pageSize, sortBy } = params;
+    const apiKey = process.env.NEWSAPI_KEY;
+    
+    if (!apiKey) {
+      console.warn("NEWSAPI_KEY not configured, skipping NewsAPI");
+      return [];
+    }
+    
+    // NewsAPI free tier only supports 'everything' endpoint with certain limitations
+    const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&language=${language}&pageSize=${pageSize}&sortBy=${sortBy || 'publishedAt'}&apiKey=${apiKey}`;
+    
+    console.log(`📡 Fetching from NewsAPI: ${q}`);
+    
+    const response = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      timeout: 15000
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`NewsAPI HTTP ${response.status}: ${errorText.substring(0, 100)}`);
+    }
+    
+    const data = await response.json();
+    
+    if (data.status !== "ok") {
+      throw new Error(`NewsAPI error: ${data.message || "Unknown error"}`);
+    }
+    
+    console.log(`✅ NewsAPI returned ${data.articles?.length || 0} articles`);
+    return data.articles || [];
+    
+  } catch (error) {
+    console.warn(`❌ NewsAPI fetch failed:`, error.message);
+    return [];
+  }
+}
+
+// 2. GNews.io Integration
+async function fetchFromGNewsAPI(params) {
+  try {
+    const { q, lang, country, max } = params;
+    const apiKey = process.env.GNEWS_API_KEY;
+    
+    if (!apiKey) {
+      console.warn("GNEWS_API_KEY not configured, skipping GNews");
+      return [];
+    }
+    
+    // GNews API v4 endpoint
+    const baseUrl = country ? 
+      `https://gnews.io/api/v4/top-headlines?q=${encodeURIComponent(q)}&lang=${lang}&country=${country}&max=${max}&apikey=${apiKey}` :
+      `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&lang=${lang}&max=${max}&apikey=${apiKey}`;
+    
+    console.log(`📡 Fetching from GNews: ${q} (${lang})`);
+    
+    const response = await fetch(baseUrl, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      timeout: 15000
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`GNews HTTP ${response.status}: ${errorText.substring(0, 100)}`);
+    }
+    
+    const data = await response.json();
+    
+    // GNews returns articles in 'articles' property
+    console.log(`✅ GNews returned ${data.articles?.length || 0} articles`);
+    return data.articles || [];
+    
+  } catch (error) {
+    console.warn(`❌ GNews fetch failed:`, error.message);
+    return [];
+  }
+}
+
+// 3. RSS Feed Fetcher (for News18 Uttarakhand and fallback)
+async function fetchRSSFeed(feedUrl, maxItems = 10) {
+  try {
+    console.log(`📡 Fetching RSS: ${feedUrl}`);
+    
+    const response = await fetch(feedUrl, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      timeout: 15000
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    
+    let xmlText = await response.text();
+    xmlText = sanitizeXml(xmlText);
+    
+    const feed = await parser.parseString(xmlText);
+    
+    if (!feed.items || feed.items.length === 0) {
+      console.warn(`No items in feed: ${feedUrl}`);
+      return [];
+    }
+    
+    const items = feed.items.slice(0, maxItems);
+    console.log(`✅ Fetched ${items.length} items from RSS: ${feedUrl}`);
+    
+    return items.map(item => {
+      // Extract image from various RSS formats
+      let image = null;
+      
+      if (item.enclosure && item.enclosure.url && item.enclosure.type && item.enclosure.type.startsWith('image/')) {
+        image = item.enclosure.url;
+      } else if (item['media:content'] && item['media:content'].url) {
+        image = item['media:content'].url;
+      } else if (item['media:thumbnail'] && item['media:thumbnail'].url) {
+        image = item['media:thumbnail'].url;
+      } else if (item['media:group'] && item['media:group']['media:content']) {
+        const mediaContent = item['media:group']['media:content'];
+        if (Array.isArray(mediaContent)) {
+          const img = mediaContent.find(m => m.medium === 'image' || m.type?.startsWith('image/'));
+          image = img?.url || mediaContent[0]?.url;
+        } else if (mediaContent.url) {
+          image = mediaContent.url;
+        }
+      } else if (item.content && item.content.includes('<img')) {
+        const $ = cheerio.load(item.content);
+        const firstImg = $('img').first();
+        if (firstImg.length) {
+          image = firstImg.attr('src');
+        }
+      }
+      
+      return {
+        title: item.title || "No title",
+        description: item.contentSnippet || item.description || item.title || "",
+        url: item.link || item.guid,
+        image: image,
+        pubDate: item.pubDate,
+        source: feed.title || feedUrl
+      };
+    });
+    
+  } catch (error) {
+    console.warn(`❌ Failed to fetch RSS ${feedUrl}:`, error.message);
+    return [];
+  }
+}
+
+// 4. Normalize articles from different sources to common format
+function normalizeArticle(apiArticle, sourceConfig) {
+  // Handle different API response formats
+  
+  if (sourceConfig.type === "NEWSAPI") {
+    // NewsAPI format
+    return {
+      title: apiArticle.title || 'No Title',
+      description: apiArticle.description || apiArticle.content || '',
+      url: apiArticle.url,
+      image: apiArticle.urlToImage,
+      pubDate: apiArticle.publishedAt,
+      source: apiArticle.source?.name || sourceConfig.name,
+      meta: {
+        api: "NEWSAPI",
+        sourceName: sourceConfig.name
+      }
+    };
+  } else if (sourceConfig.type === "GNEWS") {
+    // GNews format
+    return {
+      title: apiArticle.title || 'No Title',
+      description: apiArticle.description || apiArticle.content || '',
+      url: apiArticle.url,
+      image: apiArticle.image,
+      pubDate: apiArticle.publishedAt,
+      source: apiArticle.source?.name || sourceConfig.name,
+      meta: {
+        api: "GNEWS",
+        sourceName: sourceConfig.name
+      }
+    };
+  } else {
+    // RSS format
+    return {
+      title: apiArticle.title || 'No Title',
+      description: apiArticle.description || '',
+      url: apiArticle.url,
+      image: apiArticle.image,
+      pubDate: apiArticle.pubDate,
+      source: apiArticle.source || sourceConfig.name,
+      meta: {
+        api: "RSS",
+        sourceName: sourceConfig.name
+      }
+    };
+  }
 }
 
 /* -------------------- PARALLEL AI PROVIDERS (OpenRouter + Groq) -------------------- */
@@ -599,77 +874,8 @@ async function fetchArticleImage(url) {
   }
 }
 
-/* -------------------- RSS Feed Processing -------------------- */
-async function fetchRSSFeed(feedUrl) {
-  try {
-    console.log(`📡 Fetching RSS: ${feedUrl}`);
-    
-    const response = await fetch(feedUrl, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 15000
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    let xmlText = await response.text();
-    xmlText = sanitizeXml(xmlText);
-    
-    const feed = await parser.parseString(xmlText);
-    
-    if (!feed.items || feed.items.length === 0) {
-      console.warn(`No items in feed: ${feedUrl}`);
-      return [];
-    }
-    
-    console.log(`✅ Fetched ${feed.items.length} items from ${feedUrl}`);
-    return feed.items.map(item => {
-      // Extract image from various RSS formats
-      let image = null;
-      
-      // Try different image sources in priority order
-      if (item.enclosure && item.enclosure.url && item.enclosure.type && item.enclosure.type.startsWith('image/')) {
-        image = item.enclosure.url;
-      } else if (item['media:content'] && item['media:content'].url) {
-        image = item['media:content'].url;
-      } else if (item['media:thumbnail'] && item['media:thumbnail'].url) {
-        image = item['media:thumbnail'].url;
-      } else if (item['media:group'] && item['media:group']['media:content']) {
-        const mediaContent = item['media:group']['media:content'];
-        if (Array.isArray(mediaContent)) {
-          const img = mediaContent.find(m => m.medium === 'image' || m.type?.startsWith('image/'));
-          image = img?.url || mediaContent[0]?.url;
-        } else if (mediaContent.url) {
-          image = mediaContent.url;
-        }
-      } else if (item.content && item.content.includes('<img')) {
-        // Try to extract image from HTML content
-        const $ = cheerio.load(item.content);
-        const firstImg = $('img').first();
-        if (firstImg.length) {
-          image = firstImg.attr('src');
-        }
-      }
-      
-      return {
-        title: item.title || "No title",
-        description: item.contentSnippet || item.description || item.title || "",
-        url: item.link || item.guid,
-        image: image,
-        pubDate: item.pubDate,
-        source: feed.title || feedUrl
-      };
-    });
-    
-  } catch (error) {
-    console.warn(`❌ Failed to fetch RSS ${feedUrl}:`, error.message);
-    return [];
-  }
-}
-
 /* -------------------- Process Single News Item -------------------- */
-async function processNewsItem(item, sourceType = "rss") {
+async function processNewsItem(item, sourceType = "api") {
   try {
     // Check if already exists
     const { data: existing } = await supabase
@@ -739,7 +945,7 @@ async function processNewsItem(item, sourceType = "rss") {
       source_url: item.url || "",
       ai_content: aiResult.content,
       short_desc: aiResult.content.substring(0, 200) + "...",
-      image_url: articleImage || getDefaultImage(genre, region), // Use default if no image
+      image_url: articleImage || getDefaultImage(genre, region),
       published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
       region: region,
       genre: genre,
@@ -749,7 +955,9 @@ async function processNewsItem(item, sourceType = "rss") {
         ai_provider: aiResult.provider,
         word_count: aiResult.wordCount,
         image_source: articleImage ? 
-          (item.image === articleImage ? 'rss' : 'scraped') : 'default'
+          (item.image === articleImage ? 'api' : 'scraped') : 'default',
+        api_source: item.meta?.api || "unknown",
+        source_name: item.meta?.sourceName || item.source || "unknown"
       }
     };
     
@@ -761,7 +969,7 @@ async function processNewsItem(item, sourceType = "rss") {
       return null;
     }
     
-    console.log(`✅ Added: ${aiResult.title.substring(0, 50)}... (${aiResult.provider}, ${aiResult.wordCount} words)`);
+    console.log(`✅ Added: ${aiResult.title.substring(0, 50)}... (${aiResult.provider}, ${aiResult.wordCount} words, ${item.meta?.api || 'api'})`);
     
     // Log image status
     if (record.image_url) {
@@ -778,38 +986,102 @@ async function processNewsItem(item, sourceType = "rss") {
   }
 }
 
-/* -------------------- Main Processing Function -------------------- */
+/* -------------------- Main Processing Function (UPDATED) -------------------- */
 async function processAllNews() {
-  console.log("\n" + "=".repeat(50));
-  console.log("🚀 STARTING NEWS PROCESSING CYCLE");
-  console.log("=".repeat(50));
+  console.log("\n" + "=".repeat(60));
+  console.log("🚀 STARTING PRIORITY NEWS PROCESSING CYCLE");
+  console.log("=".repeat(60));
   
   const allItems = [];
+  const sourceStats = {};
   
-  // Fetch RSS feeds in parallel
-  const feedPromises = [];
+  // Sort sources by priority (Uttarakhand first, then National, then International)
+  const sourcesByPriority = Object.entries(NEWS_SOURCES)
+    .map(([key, config]) => ({ key, ...config }))
+    .sort((a, b) => a.priority - b.priority);
   
-  // Uttarakhand feeds
-  for (const feedUrl of UTTRAKHAND_FEEDS) {
-    feedPromises.push(fetchRSSFeed(feedUrl));
-  }
+  console.log(`📊 Processing ${sourcesByPriority.length} sources by priority...\n`);
   
-  // India feeds
-  for (const feedUrl of INDIA_FEEDS) {
-    feedPromises.push(fetchRSSFeed(feedUrl));
-  }
-  
-  // Wait for all feeds
-  const feedResults = await Promise.allSettled(feedPromises);
-  
-  // Collect all items
-  for (const result of feedResults) {
-    if (result.status === 'fulfilled') {
-      allItems.push(...result.value);
+  // Process each source in priority order
+  for (const source of sourcesByPriority) {
+    try {
+      console.log(`🔍 [Priority ${source.priority}] Fetching ${source.name} (${source.type})...`);
+      
+      let rawArticles = [];
+      
+      // Fetch based on source type
+      switch (source.type) {
+        case "NEWSAPI":
+          rawArticles = await fetchFromNewsAPI(source.config);
+          break;
+        case "GNEWS":
+          rawArticles = await fetchFromGNewsAPI(source.config);
+          break;
+        case "RSS":
+          rawArticles = await fetchRSSFeed(source.config.url, source.config.maxItems);
+          break;
+      }
+      
+      // Normalize articles
+      const normalizedArticles = rawArticles.map(article => 
+        normalizeArticle(article, source)
+      );
+      
+      // Add to collection
+      allItems.push(...normalizedArticles);
+      sourceStats[source.name] = normalizedArticles.length;
+      
+      console.log(`   ✅ Added ${normalizedArticles.length} articles from ${source.name}`);
+      
+      // Brief pause between API calls to respect rate limits
+      if (source.type !== "RSS") {
+        await sleep(800);
+      }
+      
+    } catch (error) {
+      console.log(`   ❌ Failed to fetch ${source.name}:`, error.message);
+      sourceStats[source.name] = 0;
     }
   }
   
-  console.log(`📊 Total items fetched: ${allItems.length}`);
+  // Fallback to legacy RSS if API sources returned few/no articles
+  if (allItems.length < 10) {
+    console.log("\n⚠️  API sources returned few articles, trying legacy RSS feeds...");
+    
+    try {
+      // Fetch legacy Uttarakhand feeds
+      for (const feedUrl of UTTRAKHAND_FEEDS) {
+        const rssItems = await fetchRSSFeed(feedUrl, 5);
+        const normalized = rssItems.map(item => ({
+          ...item,
+          meta: { api: "RSS_LEGACY", sourceName: "Legacy RSS" }
+        }));
+        allItems.push(...normalized);
+        console.log(`   ✅ Added ${normalized.length} articles from legacy RSS: ${feedUrl}`);
+      }
+      
+      // Fetch legacy India feeds
+      for (const feedUrl of INDIA_FEEDS) {
+        const rssItems = await fetchRSSFeed(feedUrl, 5);
+        const normalized = rssItems.map(item => ({
+          ...item,
+          meta: { api: "RSS_LEGACY", sourceName: "Legacy RSS" }
+        }));
+        allItems.push(...normalized);
+        console.log(`   ✅ Added ${normalized.length} articles from legacy RSS: ${feedUrl}`);
+      }
+    } catch (error) {
+      console.log(`   ❌ Legacy RSS fallback failed:`, error.message);
+    }
+  }
+  
+  // Display statistics
+  console.log("\n" + "=".repeat(60));
+  console.log("📈 SOURCE STATISTICS:");
+  Object.entries(sourceStats).forEach(([name, count]) => {
+    console.log(`   ${name}: ${count} articles`);
+  });
+  console.log(`📊 TOTAL ITEMS FETCHED: ${allItems.length}`);
   
   // Remove duplicates by URL
   const uniqueItems = [];
@@ -822,14 +1094,19 @@ async function processAllNews() {
     }
   }
   
-  console.log(`📊 Unique items: ${uniqueItems.length}`);
+  console.log(`📊 UNIQUE ITEMS: ${uniqueItems.length}`);
   
-  // Process items in parallel using concurrency queue
+  // Process items in parallel using concurrency queue (prioritize recent items)
   const processPromises = [];
+  const itemsToProcess = uniqueItems
+    .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0))
+    .slice(0, 20); // Increased limit for more coverage
   
-  for (const item of uniqueItems.slice(0, 15)) { // Limit to 15 items per cycle
+  console.log(`🔄 Processing ${itemsToProcess.length} most recent unique items...\n`);
+  
+  for (const item of itemsToProcess) {
     processPromises.push(
-      enqueueTask(() => processNewsItem(item, "rss"))
+      enqueueTask(() => processNewsItem(item, "api"))
     );
   }
   
@@ -837,8 +1114,14 @@ async function processAllNews() {
   const processedResults = await Promise.allSettled(processPromises);
   
   const successful = processedResults.filter(r => r.status === 'fulfilled' && r.value !== null).length;
-  console.log(`\n🎯 Processing complete: ${successful} new articles added`);
-  console.log("=".repeat(50) + "\n");
+  const failed = processedResults.filter(r => r.status === 'rejected').length;
+  
+  console.log("\n" + "=".repeat(60));
+  console.log(`🎯 PROCESSING COMPLETE:`);
+  console.log(`   ✅ ${successful} new articles added`);
+  console.log(`   ❌ ${failed} articles failed`);
+  console.log(`   ⏭️ ${itemsToProcess.length - successful - failed} duplicates skipped`);
+  console.log("=".repeat(60) + "\n");
   
   return successful;
 }
@@ -857,10 +1140,10 @@ async function runScheduledProcessing() {
   try {
     await processAllNews();
     
-    // Cleanup old articles
+    // Cleanup old articles (keep 7 days)
     try {
       const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-      const { error } = await supabase
+      const { error, count } = await supabase
         .from("ai_news")
         .delete()
         .lt("created_at", cutoff);
@@ -868,7 +1151,7 @@ async function runScheduledProcessing() {
       if (error) {
         console.warn("Cleanup error:", error.message);
       } else {
-        console.log("🧹 Cleanup completed");
+        console.log(`🧹 Cleanup completed: ${count || 0} old articles removed`);
       }
     } catch (cleanupError) {
       console.warn("Cleanup failed:", cleanupError.message);
@@ -884,8 +1167,8 @@ async function runScheduledProcessing() {
 // Initial run after 5 seconds
 setTimeout(runScheduledProcessing, 5000);
 
-// Periodic runs every 15 minutes
-const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 15;
+// Periodic runs every 20 minutes
+const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 20;
 setInterval(runScheduledProcessing, POLL_MINUTES * 60 * 1000);
 
 /* -------------------- API Routes -------------------- */
@@ -1021,11 +1304,12 @@ app.get("/api/run-now", async (req, res) => {
 
 app.get("/api/stats", async (req, res) => {
   try {
+    // Get detailed stats including API sources
     const { data, error } = await supabase
       .from("ai_news")
-      .select("genre, region, created_at")
+      .select("genre, region, created_at, meta")
       .order("created_at", { ascending: false })
-      .limit(100);
+      .limit(200);
 
     if (error) {
       return res.status(500).json({ success: false, error: error.message });
@@ -1035,6 +1319,7 @@ app.get("/api/stats", async (req, res) => {
       total: data?.length || 0,
       byGenre: {},
       byRegion: {},
+      byApiSource: {},
       recent: data?.slice(0, 10) || []
     };
 
@@ -1045,6 +1330,10 @@ app.get("/api/stats", async (req, res) => {
       
       // Region stats
       stats.byRegion[item.region] = (stats.byRegion[item.region] || 0) + 1;
+      
+      // API source stats
+      const apiSource = item.meta?.api_source || "unknown";
+      stats.byApiSource[apiSource] = (stats.byApiSource[apiSource] || 0) + 1;
     });
 
     res.json({ success: true, stats });
@@ -1058,28 +1347,75 @@ app.get("/api/stats", async (req, res) => {
   }
 });
 
+app.get("/api/sources", async (req, res) => {
+  try {
+    // Get active sources from configuration
+    const activeSources = Object.entries(NEWS_SOURCES)
+      .map(([key, config]) => ({
+        key,
+        name: config.name,
+        type: config.type,
+        priority: config.priority,
+        active: config.type === "RSS" || 
+               (config.type === "NEWSAPI" && process.env.NEWSAPI_KEY) ||
+               (config.type === "GNEWS" && process.env.GNEWS_API_KEY)
+      }))
+      .sort((a, b) => a.priority - b.priority);
+
+    res.json({
+      success: true,
+      sources: activeSources,
+      apiKeys: {
+        NEWSAPI: !!process.env.NEWSAPI_KEY,
+        GNEWS: !!process.env.GNEWS_API_KEY,
+        OPENROUTER: !!process.env.OPENROUTER_API_KEY,
+        GROQ: !!process.env.GROQ_API_KEY
+      },
+      config: {
+        maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+        pollMinutes: POLL_MINUTES,
+        priorityOrder: "Uttarakhand → National → International"
+      }
+    });
+  } catch (error) {
+    console.error("Sources error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: "Server error",
+      message: error.message 
+    });
+  }
+});
+
 app.get("/health", (req, res) => {
   const providers = [];
   if (process.env.OPENROUTER_API_KEY) providers.push("OpenRouter");
   if (process.env.GROQ_API_KEY) providers.push("Groq");
   
+  const apiSources = [];
+  if (process.env.NEWSAPI_KEY) apiSources.push("NewsAPI");
+  if (process.env.GNEWS_API_KEY) apiSources.push("GNews");
+  
   res.json({
     success: true,
     status: "healthy",
     timestamp: new Date().toISOString(),
-    service: "Hindi News AI Rewriter",
-    version: "4.1",
-    features: ["Enhanced Image Fetching", "Parallel AI Processing"],
-    providers: providers.length > 0 ? providers : ["Fallback"],
+    service: "Hindi News AI Rewriter with Priority API System",
+    version: "5.0",
+    features: ["Enhanced Image Fetching", "Parallel AI Processing", "Priority News APIs"],
+    ai_providers: providers.length > 0 ? providers : ["Fallback"],
+    news_apis: apiSources.length > 0 ? apiSources : ["RSS Fallback Only"],
     queue: {
       running: runningTasks,
       pending: taskQueue.length,
       maxConcurrent: MAX_CONCURRENT_TASKS
     },
     processing: isProcessing,
-    feeds: {
-      uttarakhand: UTTRAKHAND_FEEDS.length,
-      india: INDIA_FEEDS.length
+    priority_system: {
+      uttarakhand_sources: 2,
+      india_sources: 2,
+      international_sources: 2,
+      total_sources: 6
     }
   });
 });
@@ -1087,25 +1423,35 @@ app.get("/health", (req, res) => {
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: "Hindi News Rewriter API",
-    version: "4.1",
-    description: "Parallel AI processing with OpenRouter + Groq + Enhanced Image Fetching",
+    message: "Hindi News Rewriter API with Priority News System",
+    version: "5.0",
+    description: "Priority-based news fetching (Uttarakhand → National → International) with NEWSAPI + GNEWS + RSS",
     endpoints: {
       news: "/api/news",
       article: "/api/news/:slug",
       search: "/api/search",
       stats: "/api/stats",
+      sources: "/api/sources",
       health: "/health",
       manual_run: "/api/run-now"
     },
     features: [
+      "Priority-based news fetching (Uttarakhand first)",
+      "NEWSAPI + GNEWS integration",
+      "News18 Uttarakhand RSS support",
       "Parallel AI processing (OpenRouter + Groq)",
       "Enhanced image fetching from article pages",
       "Smart fallback images by genre/region",
-      "Automatic RSS fetching",
-      "Hindi content rewriting",
-      "Smart deduplication",
-      "Concurrent processing"
+      "Automatic deduplication",
+      "Concurrent processing with rate limiting"
+    ],
+    priority_order: [
+      "1. News18 Uttarakhand (RSS)",
+      "2. GNews Uttarakhand (Hindi)",
+      "3. India National (NewsAPI)",
+      "4. India Hindi (GNews)",
+      "5. International (GNews)",
+      "6. World News (NewsAPI)"
     ]
   });
 });
@@ -1145,29 +1491,45 @@ process.on("SIGINT", () => {
 app.listen(PORT, () => {
   console.log(`
   🚀 SERVER STARTED SUCCESSFULLY!
-  ================================
+  ============================================
   Port: ${PORT}
   URL: https://rt-india.onrender.com
   
   🔧 CONFIGURATION:
   - Max concurrent tasks: ${MAX_CONCURRENT_TASKS}
   - Poll interval: ${POLL_MINUTES} minutes
-  - AI Providers: ${process.env.OPENROUTER_API_KEY ? 'OpenRouter ✅' : 'OpenRouter ❌'} | ${process.env.GROQ_API_KEY ? 'Groq ✅' : 'Groq ❌'}
+  - Priority System: Uttarakhand → National → International
+  
+  🔑 API STATUS:
+  - NewsAPI: ${process.env.NEWSAPI_KEY ? '✅ Configured' : '❌ Not configured'}
+  - GNews API: ${process.env.GNEWS_API_KEY ? '✅ Configured' : '❌ Not configured'}
+  - OpenRouter: ${process.env.OPENROUTER_API_KEY ? '✅ Configured' : '❌ Not configured'}
+  - Groq: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}
+  
+  📊 NEWS SOURCES (by priority):
+  1. News18 Uttarakhand (RSS)
+  2. GNews Uttarakhand (Hindi)
+  3. India National (NewsAPI)
+  4. India Hindi (GNews)
+  5. International (GNews)
+  6. World News (NewsAPI)
   
   📝 ENDPOINTS:
   - API News: /api/news
+  - Sources: /api/sources
   - Health: /health
   - Manual Run: /api/run-now
   - Stats: /api/stats
   
   ⚡ FEATURES:
-  - Parallel AI processing (OpenRouter + Groq simultaneously)
-  - Enhanced image fetching from article pages
-  - Smart fallback images by genre/region
-  - Smart RSS fetching
+  - Priority-based news fetching (Uttarakhand first)
+  - NEWSAPI + GNEWS integration
+  - News18 Uttarakhand RSS support
+  - Parallel AI processing (OpenRouter + Groq)
+  - Enhanced image fetching
+  - Smart fallback images
   - Automatic deduplication
-  - Concurrent article processing
   
-  📊 Ready to process Hindi news with images!
+  📊 Ready to process priority Hindi news with images!
   `);
 });
