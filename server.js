@@ -1215,25 +1215,25 @@ app.get("/api/news", async (req, res) => {
   }
 });
 
+// FIXED: This endpoint now returns the article directly (not wrapped in {success: true, data: ...})
 app.get("/api/news/:slug", async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data: article, error } = await supabase
       .from("ai_news")
       .select("*")
       .eq("slug", req.params.slug)
       .single();
 
-    if (error || !data) {
+    if (error || !article) {
       return res.status(404).json({ 
         success: false, 
         error: "Article not found" 
       });
     }
 
-    res.json({ 
-      success: true, 
-      data 
-    });
+    // FIXED: Return article directly to match client expectations
+    res.json(article);
+    
   } catch (error) {
     console.error("API error:", error);
     res.status(500).json({ 
@@ -1516,19 +1516,22 @@ app.listen(PORT, () => {
   
   📝 ENDPOINTS:
   - API News: /api/news
+  - Article: /api/news/:slug (FIXED: returns article directly)
+  - Search: /api/search
+  - Stats: /api/stats
   - Sources: /api/sources
   - Health: /health
   - Manual Run: /api/run-now
-  - Stats: /api/stats
   
   ⚡ FEATURES:
   - Priority-based news fetching (Uttarakhand first)
   - NEWSAPI + GNEWS integration
   - News18 Uttarakhand RSS support
   - Parallel AI processing (OpenRouter + Groq)
-  - Enhanced image fetching
-  - Smart fallback images
+  - Enhanced image fetching from article pages
+  - Smart fallback images by genre/region
   - Automatic deduplication
+  - Concurrent processing with rate limiting
   
   📊 Ready to process priority Hindi news with images!
   `);
