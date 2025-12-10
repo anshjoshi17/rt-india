@@ -315,33 +315,102 @@ const providers = [
 ].filter((p) => p.enabled);
 
 /* -------------------- ORCHESTRATION & HELPERS -------------------- */
+
+// Build a clear rewrite prompt: paraphrase and expand to ~300-400 words.
+// Keep same language as input. Preserve facts. Do not invent new facts or quotes.
+// Output plain text only (no HTML/markdown), short paragraphs.
+function buildRewritePrompt(sourceText) {
+  const targetMin = Number(process.env.MIN_AI_WORDS) || 300;
+  const targetMax = Number(process.env.MAX_AI_WORDS) || 400;
+  return (
+    "You are a professional news editor.\n\n" +
+    "Task: Rewrite and expand the following source content into an original, neutral, factual news article of approximately " +
+    `${targetMin}-${targetMax} words. ` +
+    "Use different wording (paraphrase) and elaborate where appropriate to make it readable for web audiences. " +
+    "Preserve all factual information (names, dates, locations, direct quotes). DO NOT INVENT new facts, statistics, or quotes. If information is missing, do not guess.\n\n" +
+    "Formatting instructions: Output **plain text only** (no HTML, no Markdown). Use clear short paragraphs (2-5 sentences each). Keep the same language as the input.\n\n" +
+    "Source content:\n\n" +
+    String(sourceText || "").trim()
+  );
+}
+
 function withTimeout(promise, ms, name) {
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${ms}ms (${name})`)), ms));
   return Promise.race([promise, timeout]);
 }
 
-async function rewriteWithParallel(text) {
-  if (!providers.length) return { text, provider: null, timed_out: false };
-  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 15000;
+function countWords(s) {
+  if (!s) return 0;
+  return String(s).trim().split(/\s+/).filter(Boolean).length;
+}
+
+// Attempt a single round of parallel provider calls using Promise.any
+async function attemptRewriteOnce(prompt, timeoutMs) {
+  if (!providers.length) throw new Error("No providers configured");
   const attempts = providers.map((p) =>
     withTimeout(
       (async () => {
-        await sleep(Math.floor(Math.random() * 50));
-        const out = await p.fn(text);
+        await sleep(Math.floor(Math.random() * 80));
+        const out = await p.fn(prompt);
         if (!out || String(out).trim().length < 10) throw new Error("empty output");
         return { text: String(out).trim(), provider: p.name };
       })(),
-      TIMEOUT_MS,
+      timeoutMs,
       p.name
     )
   );
+  // Promise.any will throw AggregateError if all reject
+  const result = await Promise.any(attempts);
+  return result;
+}
 
-  try {
-    const result = await Promise.any(attempts);
-    return { text: result.text, provider: result.provider, timed_out: false };
-  } catch (agg) {
-    return { text, provider: null, timed_out: true, error: agg };
+// rewriteWithParallel: try providers in parallel, enforce word count (300-400 by default)
+// retries up to PROVIDER_RETRY_COUNT (default 2) with a slightly stronger directive if results are out-of-range.
+async function rewriteWithParallel(text) {
+  if (!providers.length) return { text, provider: null, timed_out: false };
+
+  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 20000;
+  const RETRIES = Number(process.env.PROVIDER_RETRY_COUNT) || 2;
+  const MIN_WORDS = Number(process.env.MIN_AI_WORDS) || 300;
+  const MAX_WORDS = Number(process.env.MAX_AI_WORDS) || 400;
+
+  let basePrompt = buildRewritePrompt(text);
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    try {
+      // on retry attempts > 0, append a stricter length note to encourage adherence
+      const promptToSend = attempt === 0 ? basePrompt : basePrompt + `\n\nReminder: The article must be approximately ${MIN_WORDS}-${MAX_WORDS} words. Please expand or shorten accordingly.`;
+
+      const result = await attemptRewriteOnce(promptToSend, TIMEOUT_MS);
+      const out = result?.text || "";
+      const wc = countWords(out);
+
+      // If within desired range, return
+      if (wc >= MIN_WORDS && wc <= MAX_WORDS) {
+        return { text: out, provider: result.provider, timed_out: false, words: wc, attempts: attempt + 1 };
+      }
+
+      // If not in range but reasonably long (> 200 words), accept on last attempt
+      if (attempt === RETRIES) {
+        return { text: out, provider: result.provider, timed_out: false, words: wc, attempts: attempt + 1, note: "final-accept" };
+      }
+
+      // Otherwise, try again (log and continue)
+      lastError = new Error(`provider ${result.provider} returned ${wc} words (out of ${MIN_WORDS}-${MAX_WORDS}), retrying`);
+      console.warn(lastError.message);
+      // small sleep before retry
+      await sleep(200 + Math.floor(Math.random() * 300));
+    } catch (err) {
+      lastError = err;
+      console.warn("Rewrite attempt failed:", err && err.message ? err.message : err);
+      // if all providers timed out / failed on this attempt, immediately try again until retries exhausted
+      await sleep(200 + Math.floor(Math.random() * 300));
+    }
   }
+
+  // If we reach here, fall back to returning original text (so pipeline continues)
+  return { text, provider: null, timed_out: true, error: lastError };
 }
 
 /* -------------------- RSS DISCOVERY & FETCHERS -------------------- */
