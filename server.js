@@ -1,4 +1,4 @@
-// server.js - OPENROUTER + GROQ PARALLEL VERSION
+// server.js - OPENROUTER + GROQ PARALLEL VERSION WITH ENHANCED IMAGE FETCHING
 require("dotenv").config();
 
 const express = require("express");
@@ -69,7 +69,14 @@ app.use(express.urlencoded({ extended: true }));
 
 /* -------------------- RSS Parser -------------------- */
 const parser = new RSSParser({
-  customFields: { item: ["media:content", "enclosure"] }
+  customFields: {
+    item: [
+      ['media:content', 'media:content', { keepArray: true }],
+      ['media:thumbnail', 'media:thumbnail', { keepArray: true }],
+      ['media:group', 'media:group'],
+      ['enclosure', 'enclosure', { keepArray: true }]
+    ]
+  }
 });
 
 /* -------------------- Supabase -------------------- */
@@ -127,6 +134,36 @@ function processNextTask() {
       runningTasks--;
       setImmediate(processNextTask);
     });
+}
+
+/* -------------------- Default Images -------------------- */
+function getDefaultImage(genre, region) {
+  const defaultImages = {
+    'Politics': 'https://images.unsplash.com/photo-1551135049-8a33b2fb7f53?w=800&auto=format&fit=crop',
+    'Crime': 'https://images.unsplash.com/photo-1589829545856-d10d557cf95f?w=800&auto=format&fit=crop',
+    'Sports': 'https://images.unsplash.com/photo-1461896836934-ffe607ba8211?w=800&auto=format&fit=crop',
+    'Entertainment': 'https://images.unsplash.com/photo-1499364615650-ec38552f4f34?w=800&auto=format&fit=crop',
+    'Business': 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&auto=format&fit=crop',
+    'Technology': 'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=800&auto=format&fit=crop',
+    'Health': 'https://images.unsplash.com/photo-1559757148-5c350d0d3c56?w=800&auto=format&fit=crop',
+    'Environment': 'https://images.unsplash.com/photo-1501854140801-50d01698950b?w=800&auto=format&fit=crop',
+    'Education': 'https://images.unsplash.com/photo-1523050854058-8df90110c9f1?w=800&auto=format&fit=crop',
+    'Lifestyle': 'https://images.unsplash.com/photo-1488521787991-ed7bbaae773c?w=800&auto=format&fit=crop',
+    'Weather': 'https://images.unsplash.com/photo-1592210454359-9043f067919b?w=800&auto=format&fit=crop',
+    'Other': 'https://images.unsplash.com/photo-1588681664899-f142ff2dc9b1?w=800&auto=format&fit=crop'
+  };
+  
+  // Uttarakhand specific images
+  if (region === 'uttarakhand') {
+    const uttarakhandImages = {
+      'Politics': 'https://images.unsplash.com/photo-1578662996442-48f60103fc96?w=800&auto=format&fit=crop',
+      'Environment': 'https://images.unsplash.com/photo-1548013146-72479768bada?w=800&auto=format&fit=crop',
+      'default': 'https://images.unsplash.com/photo-1548013146-72479768bada?w=800&auto=format&fit=crop'
+    };
+    return uttarakhandImages[genre] || uttarakhandImages.default;
+  }
+  
+  return defaultImages[genre] || defaultImages['Other'];
 }
 
 /* -------------------- Detection Helpers -------------------- */
@@ -403,6 +440,7 @@ function parseAIResponse(aiOutput) {
   return { title, content };
 }
 
+/* -------------------- Fetch Article Content -------------------- */
 async function fetchArticleBody(url) {
   try {
     const res = await fetch(url, { 
@@ -474,6 +512,93 @@ async function fetchArticleBody(url) {
   }
 }
 
+/* -------------------- Fetch Article Image -------------------- */
+async function fetchArticleImage(url) {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive"
+      },
+      timeout: 10000
+    });
+    
+    if (!response.ok) return null;
+    
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    
+    // Common image selectors for news sites
+    const imageSelectors = [
+      'meta[property="og:image"]',
+      'meta[name="twitter:image"]',
+      'meta[property="twitter:image"]',
+      'meta[name="og:image"]',
+      '.article-img img',
+      '.story-img img',
+      '.featured-image img',
+      '.wp-post-image',
+      '.entry-thumbnail img',
+      '.td-post-featured-image img',
+      'figure img',
+      '.image-container img',
+      '.media-container img',
+      'img[itemprop="image"]',
+      'img.wp-image',
+      '.main-img',
+      '.article-image'
+    ];
+    
+    let imageUrl = null;
+    
+    // Try meta tags first (most reliable)
+    for (const selector of imageSelectors.slice(0, 4)) {
+      const meta = $(selector);
+      if (meta.length) {
+        const content = meta.attr('content');
+        if (content && content.startsWith('http')) {
+          imageUrl = content;
+          break;
+        }
+      }
+    }
+    
+    // If no meta image, try to find the main content image
+    if (!imageUrl) {
+      for (const selector of imageSelectors.slice(4)) {
+        const img = $(selector).first();
+        if (img.length) {
+          const src = img.attr('src') || img.attr('data-src') || img.attr('data-lazy-src');
+          if (src && src.startsWith('http')) {
+            imageUrl = src;
+            break;
+          }
+        }
+      }
+    }
+    
+    // Resolve relative URLs
+    if (imageUrl && !imageUrl.startsWith('http')) {
+      try {
+        const urlObj = new URL(url);
+        imageUrl = new URL(imageUrl, urlObj.origin).href;
+      } catch (e) {
+        // If we can't resolve the URL, discard it
+        imageUrl = null;
+      }
+    }
+    
+    return imageUrl;
+    
+  } catch (error) {
+    console.warn(`Failed to fetch image from ${url}:`, error.message);
+    return null;
+  }
+}
+
 /* -------------------- RSS Feed Processing -------------------- */
 async function fetchRSSFeed(feedUrl) {
   try {
@@ -499,14 +624,43 @@ async function fetchRSSFeed(feedUrl) {
     }
     
     console.log(`✅ Fetched ${feed.items.length} items from ${feedUrl}`);
-    return feed.items.map(item => ({
-      title: item.title || "No title",
-      description: item.contentSnippet || item.description || item.title || "",
-      url: item.link || item.guid,
-      image: item.enclosure?.url || item["media:content"]?.url || null,
-      pubDate: item.pubDate,
-      source: feed.title || feedUrl
-    }));
+    return feed.items.map(item => {
+      // Extract image from various RSS formats
+      let image = null;
+      
+      // Try different image sources in priority order
+      if (item.enclosure && item.enclosure.url && item.enclosure.type && item.enclosure.type.startsWith('image/')) {
+        image = item.enclosure.url;
+      } else if (item['media:content'] && item['media:content'].url) {
+        image = item['media:content'].url;
+      } else if (item['media:thumbnail'] && item['media:thumbnail'].url) {
+        image = item['media:thumbnail'].url;
+      } else if (item['media:group'] && item['media:group']['media:content']) {
+        const mediaContent = item['media:group']['media:content'];
+        if (Array.isArray(mediaContent)) {
+          const img = mediaContent.find(m => m.medium === 'image' || m.type?.startsWith('image/'));
+          image = img?.url || mediaContent[0]?.url;
+        } else if (mediaContent.url) {
+          image = mediaContent.url;
+        }
+      } else if (item.content && item.content.includes('<img')) {
+        // Try to extract image from HTML content
+        const $ = cheerio.load(item.content);
+        const firstImg = $('img').first();
+        if (firstImg.length) {
+          image = firstImg.attr('src');
+        }
+      }
+      
+      return {
+        title: item.title || "No title",
+        description: item.contentSnippet || item.description || item.title || "",
+        url: item.link || item.guid,
+        image: image,
+        pubDate: item.pubDate,
+        source: feed.title || feedUrl
+      };
+    });
     
   } catch (error) {
     console.warn(`❌ Failed to fetch RSS ${feedUrl}:`, error.message);
@@ -532,18 +686,28 @@ async function processNewsItem(item, sourceType = "rss") {
     
     console.log(`🔄 Processing: ${item.title.substring(0, 50)}...`);
     
-    // Get article content
+    // Get article content and image
     let articleContent = item.description || "";
+    let articleImage = item.image || null;
     
-    // Try to fetch full article if URL is available
+    // Try to fetch full article and image if URL is available
     if (item.url && sourceType !== "static") {
       try {
-        const fetched = await fetchArticleBody(item.url);
-        if (fetched && fetched.length > 300) {
-          articleContent = fetched;
+        // Fetch article content in parallel with image
+        const [fetchedContent, fetchedImage] = await Promise.allSettled([
+          fetchArticleBody(item.url),
+          fetchArticleImage(item.url)
+        ]);
+        
+        if (fetchedContent.status === 'fulfilled' && fetchedContent.value && fetchedContent.value.length > 300) {
+          articleContent = fetchedContent.value;
+        }
+        
+        if (fetchedImage.status === 'fulfilled' && fetchedImage.value) {
+          articleImage = fetchedImage.value;
         }
       } catch (e) {
-        // Use description if fetch fails
+        console.warn(`Failed to fetch content/image from ${item.url}:`, e.message);
       }
     }
     
@@ -568,14 +732,14 @@ async function processNewsItem(item, sourceType = "rss") {
     const sourceHost = item.url ? new URL(item.url).hostname : "";
     const region = detectRegionFromText(fullText, sourceHost);
     
-    // Prepare record
+    // Prepare record with enhanced image handling
     const record = {
       title: aiResult.title,
       slug: slug,
       source_url: item.url || "",
       ai_content: aiResult.content,
       short_desc: aiResult.content.substring(0, 200) + "...",
-      image_url: item.image,
+      image_url: articleImage || getDefaultImage(genre, region), // Use default if no image
       published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
       region: region,
       genre: genre,
@@ -583,7 +747,9 @@ async function processNewsItem(item, sourceType = "rss") {
         original_title: item.title,
         source: item.source || sourceType,
         ai_provider: aiResult.provider,
-        word_count: aiResult.wordCount
+        word_count: aiResult.wordCount,
+        image_source: articleImage ? 
+          (item.image === articleImage ? 'rss' : 'scraped') : 'default'
       }
     };
     
@@ -596,6 +762,14 @@ async function processNewsItem(item, sourceType = "rss") {
     }
     
     console.log(`✅ Added: ${aiResult.title.substring(0, 50)}... (${aiResult.provider}, ${aiResult.wordCount} words)`);
+    
+    // Log image status
+    if (record.image_url) {
+      console.log(`   📷 Image: ${record.image_url.substring(0, 80)}...`);
+    } else {
+      console.log(`   📷 No image found`);
+    }
+    
     return record;
     
   } catch (error) {
@@ -845,6 +1019,45 @@ app.get("/api/run-now", async (req, res) => {
   }
 });
 
+app.get("/api/stats", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("ai_news")
+      .select("genre, region, created_at")
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    const stats = {
+      total: data?.length || 0,
+      byGenre: {},
+      byRegion: {},
+      recent: data?.slice(0, 10) || []
+    };
+
+    // Calculate statistics
+    data?.forEach(item => {
+      // Genre stats
+      stats.byGenre[item.genre] = (stats.byGenre[item.genre] || 0) + 1;
+      
+      // Region stats
+      stats.byRegion[item.region] = (stats.byRegion[item.region] || 0) + 1;
+    });
+
+    res.json({ success: true, stats });
+  } catch (error) {
+    console.error("Stats error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: "Server error",
+      message: error.message 
+    });
+  }
+});
+
 app.get("/health", (req, res) => {
   const providers = [];
   if (process.env.OPENROUTER_API_KEY) providers.push("OpenRouter");
@@ -855,13 +1068,19 @@ app.get("/health", (req, res) => {
     status: "healthy",
     timestamp: new Date().toISOString(),
     service: "Hindi News AI Rewriter",
+    version: "4.1",
+    features: ["Enhanced Image Fetching", "Parallel AI Processing"],
     providers: providers.length > 0 ? providers : ["Fallback"],
     queue: {
       running: runningTasks,
       pending: taskQueue.length,
       maxConcurrent: MAX_CONCURRENT_TASKS
     },
-    processing: isProcessing
+    processing: isProcessing,
+    feeds: {
+      uttarakhand: UTTRAKHAND_FEEDS.length,
+      india: INDIA_FEEDS.length
+    }
   });
 });
 
@@ -869,17 +1088,20 @@ app.get("/", (req, res) => {
   res.json({
     success: true,
     message: "Hindi News Rewriter API",
-    version: "4.0",
-    description: "Parallel AI processing with OpenRouter + Groq",
+    version: "4.1",
+    description: "Parallel AI processing with OpenRouter + Groq + Enhanced Image Fetching",
     endpoints: {
       news: "/api/news",
       article: "/api/news/:slug",
       search: "/api/search",
+      stats: "/api/stats",
       health: "/health",
       manual_run: "/api/run-now"
     },
     features: [
       "Parallel AI processing (OpenRouter + Groq)",
+      "Enhanced image fetching from article pages",
+      "Smart fallback images by genre/region",
       "Automatic RSS fetching",
       "Hindi content rewriting",
       "Smart deduplication",
@@ -936,13 +1158,16 @@ app.listen(PORT, () => {
   - API News: /api/news
   - Health: /health
   - Manual Run: /api/run-now
+  - Stats: /api/stats
   
   ⚡ FEATURES:
   - Parallel AI processing (OpenRouter + Groq simultaneously)
+  - Enhanced image fetching from article pages
+  - Smart fallback images by genre/region
   - Smart RSS fetching
   - Automatic deduplication
   - Concurrent article processing
   
-  📊 Ready to process Hindi news!
+  📊 Ready to process Hindi news with images!
   `);
 });
