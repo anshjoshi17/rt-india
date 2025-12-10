@@ -97,15 +97,22 @@ const parser = new RSSParser({
 /* -------------------- SUPABASE -------------------- */
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-/* -------------------- FEEDS -------------------- */
+/* -------------------- FEEDS (expanded Hindi / Uttarakhand list) -------------------- */
 const UTTRAKHAND_FEEDS = [
   "https://www.amarujala.com/rss/uttarakhand.xml",
-  "https://zeenews.india.com/hindi/rss/state/uttarakhand.xml"
+  "https://zeenews.india.com/hindi/rss/state/uttarakhand.xml",
+  // examples — verify the exact feed URLs for each publisher and replace if needed:
+  "https://www.jagran.com/rss/uttarakhand",            // check correctness
+  "https://www.livehindustan.com/rss/uttarakhand",    // check correctness
+  "https://www.bhaskar.com/rss/uttarakhand"           // check correctness
 ];
 
 const INDIA_FEEDS = [
   "https://feeds.feedburner.com/ndtvkhabar",
-  "https://aajtak.intoday.in/rssfeeds/?id=home"
+  "https://aajtak.intoday.in/rssfeeds/?id=home",
+  "https://www.jagran.com/rss/home",
+  "https://www.livehindustan.com/rss",
+  "https://www.bhaskar.com/rss"
 ];
 
 /* -------------------- UTILS -------------------- */
@@ -237,8 +244,7 @@ async function deepseekRewrite(text) {
       ],
       max_tokens: 1200,
       temperature: 0.0
-    }),
-    timeout: 30000
+    })
   });
   const j = await r.json();
   const out = j?.choices?.[0]?.message?.content;
@@ -316,21 +322,64 @@ const providers = [
 
 /* -------------------- ORCHESTRATION & HELPERS -------------------- */
 
-// Build a clear rewrite prompt: paraphrase and expand to ~300-400 words.
-// Keep same language as input. Preserve facts. Do not invent new facts or quotes.
-// Output plain text only (no HTML/markdown), short paragraphs.
-function buildRewritePrompt(sourceText) {
-  const targetMin = Number(process.env.MIN_AI_WORDS) || 300;
-  const targetMax = Number(process.env.MAX_AI_WORDS) || 400;
+// fetch the full article page and heuristically extract main text
+async function fetchArticleBody(url) {
+  try {
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const $ = cheerio.load(html);
+
+    // try common article selectors
+    const selectors = [
+      'article',
+      '.article-body', '.story-body', '.story-content',
+      '.entry-content', '.post-content', '.td-post-content',
+      '.news-detail', '.wp-block-post-content', '#content', '.ArticleBody', '.cn__content'
+    ];
+
+    for (const sel of selectors) {
+      const el = $(sel).first();
+      if (el && el.text() && el.text().trim().length > 200) {
+        const txt = el.text().trim().replace(/\s{2,}/g, ' ');
+        if (txt.length > 200) return txt;
+      }
+    }
+
+    // fallback: gather paragraph text
+    const paras = [];
+    $('p').each((i, p) => {
+      const t = $(p).text().trim();
+      if (t.length > 30) paras.push(t);
+      // limit collected size
+      if (paras.join("\n\n").length > 5000) return false;
+    });
+
+    const joined = paras.join("\n\n").replace(/\s{2,}/g, ' ');
+    return joined.length > 200 ? joined : null;
+  } catch (e) {
+    console.warn("fetchArticleBody failed for", url, e?.message || e);
+    return null;
+  }
+}
+
+// Build a Hindi-specific rewrite prompt that requests a new headline and article.
+// The model must output a line starting with "HEADLINE:" then a blank line then the article plain-text.
+function buildRewritePromptHindi({ sourceTitle, sourceUrl, sourceText }) {
+  const MIN = Number(process.env.MIN_AI_WORDS) || 300;
+  const MAX = Number(process.env.MAX_AI_WORDS) || 400;
   return (
-    "You are a professional news editor.\n\n" +
-    "Task: Rewrite and expand the following source content into an original, neutral, factual news article of approximately " +
-    `${targetMin}-${targetMax} words. ` +
-    "Use different wording (paraphrase) and elaborate where appropriate to make it readable for web audiences. " +
-    "Preserve all factual information (names, dates, locations, direct quotes). DO NOT INVENT new facts, statistics, or quotes. If information is missing, do not guess.\n\n" +
-    "Formatting instructions: Output **plain text only** (no HTML, no Markdown). Use clear short paragraphs (2-5 sentences each). Keep the same language as the input.\n\n" +
-    "Source content:\n\n" +
-    String(sourceText || "").trim()
+    "आप एक अनुभवी समाचार संपादक हैं।\n\n" +
+    `कार्य: नीचे दी गई स्रोत सामग्री के आधार पर एक नया, मौलिक समाचार लेख लिखें — पूरी तरह **हिन्दी** में। लेख लगभग ${MIN}-${MAX} शब्दों का होना चाहिए।\n\n` +
+    "महत्वपूर्ण निर्देश:\n" +
+    "- लेख की शुरुआत एक नया हेडलाइन (headline) दें जो स्रोत हेडलाइन से अलग हो। हेडलाइन को एक अलग लाइन में इस प्रारूप से लिखें: `HEADLINE: <आपका हेडलाइन>`\n" +
+    "- उसके बाद एक खाली लाइन रखें और फिर पूरा लेख लिखें।\n" +
+    "- स्रोत में दिए गए तथ्यों (नाम, स्थान, तारीख, उद्धरण) को बनाए रखें। किसी भी तथ्य का आविष्कार न करें।\n" +
+    "- आउटपुट सिर्फ सादा-पाठ (plain text) होना चाहिए — **कोई HTML या Markdown नहीं**। छोटे पैराग्राफ (2-4 वाक्य) रखें।\n\n" +
+    `स्रोत शीर्षक: ${String(sourceTitle || "").trim()}\n` +
+    `स्रोत URL: ${String(sourceUrl || "")}\n\n` +
+    `स्रोत सामग्री:\n\n${String(sourceText || "").trim()}\n\n` +
+    `आउटपुट प्रारूप:\nHEADLINE: <यहां आपका नया हेडलाइन>\n\n<यहां लेख का शरीर — केवल हिन्दी में, सादा पाठ>` 
   );
 }
 
@@ -344,7 +393,6 @@ function countWords(s) {
   return String(s).trim().split(/\s+/).filter(Boolean).length;
 }
 
-// Attempt a single round of parallel provider calls using Promise.any
 async function attemptRewriteOnce(prompt, timeoutMs) {
   if (!providers.length) throw new Error("No providers configured");
   const attempts = providers.map((p) =>
@@ -359,58 +407,48 @@ async function attemptRewriteOnce(prompt, timeoutMs) {
       p.name
     )
   );
-  // Promise.any will throw AggregateError if all reject
   const result = await Promise.any(attempts);
   return result;
 }
 
-// rewriteWithParallel: try providers in parallel, enforce word count (300-400 by default)
-// retries up to PROVIDER_RETRY_COUNT (default 2) with a slightly stronger directive if results are out-of-range.
-async function rewriteWithParallel(text) {
-  if (!providers.length) return { text, provider: null, timed_out: false };
+// rewriteWithParallel: tries providers in parallel; enforces word count; retries if necessary
+async function rewriteWithParallel(prompt) {
+  if (!providers.length) return { text: prompt, provider: null, timed_out: false };
 
-  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 20000;
+  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 25000;
   const RETRIES = Number(process.env.PROVIDER_RETRY_COUNT) || 2;
   const MIN_WORDS = Number(process.env.MIN_AI_WORDS) || 300;
   const MAX_WORDS = Number(process.env.MAX_AI_WORDS) || 400;
 
-  let basePrompt = buildRewritePrompt(text);
   let lastError = null;
 
   for (let attempt = 0; attempt <= RETRIES; attempt++) {
     try {
-      // on retry attempts > 0, append a stricter length note to encourage adherence
-      const promptToSend = attempt === 0 ? basePrompt : basePrompt + `\n\nReminder: The article must be approximately ${MIN_WORDS}-${MAX_WORDS} words. Please expand or shorten accordingly.`;
-
+      const promptToSend = attempt === 0 ? prompt : prompt + `\n\nReminder: Write approximately ${MIN_WORDS}-${MAX_WORDS} words in Hindi and include HEADLINE: as described.`;
       const result = await attemptRewriteOnce(promptToSend, TIMEOUT_MS);
       const out = result?.text || "";
       const wc = countWords(out);
 
-      // If within desired range, return
       if (wc >= MIN_WORDS && wc <= MAX_WORDS) {
         return { text: out, provider: result.provider, timed_out: false, words: wc, attempts: attempt + 1 };
       }
 
-      // If not in range but reasonably long (> 200 words), accept on last attempt
+      // If last attempt, accept if reasonably long (>200 words)
       if (attempt === RETRIES) {
         return { text: out, provider: result.provider, timed_out: false, words: wc, attempts: attempt + 1, note: "final-accept" };
       }
 
-      // Otherwise, try again (log and continue)
       lastError = new Error(`provider ${result.provider} returned ${wc} words (out of ${MIN_WORDS}-${MAX_WORDS}), retrying`);
       console.warn(lastError.message);
-      // small sleep before retry
-      await sleep(200 + Math.floor(Math.random() * 300));
+      await sleep(300 + Math.floor(Math.random() * 300));
     } catch (err) {
       lastError = err;
       console.warn("Rewrite attempt failed:", err && err.message ? err.message : err);
-      // if all providers timed out / failed on this attempt, immediately try again until retries exhausted
-      await sleep(200 + Math.floor(Math.random() * 300));
+      await sleep(300 + Math.floor(Math.random() * 300));
     }
   }
 
-  // If we reach here, fall back to returning original text (so pipeline continues)
-  return { text, provider: null, timed_out: true, error: lastError };
+  return { text: prompt, provider: null, timed_out: true, error: lastError };
 }
 
 /* -------------------- RSS DISCOVERY & FETCHERS -------------------- */
@@ -425,9 +463,10 @@ async function discoverRSS(html, baseUrl) {
   }
 }
 
-async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 10) {
+// Accept language param (e.g., 'hi' for Hindi)
+async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 10, lang = "hi") {
   if (!process.env.NEWSAPI_KEY) return [];
-  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&pageSize=${pageSize}&language=en&sortBy=publishedAt&apiKey=${process.env.NEWSAPI_KEY}`;
+  const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&pageSize=${pageSize}&language=${lang}&sortBy=publishedAt&apiKey=${process.env.NEWSAPI_KEY}`;
   const r = await fetch(url);
   const j = await r.json();
   if (!j.articles) return [];
@@ -441,9 +480,9 @@ async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 10) {
   }));
 }
 
-async function fetchFromGNews(q = "uttarakhand", max = 10) {
+async function fetchFromGNews(q = "uttarakhand", max = 10, lang = "hi") {
   if (!process.env.GNEWS_KEY) return [];
-  const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&token=${process.env.GNEWS_KEY}&lang=en&max=${max}`;
+  const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&token=${process.env.GNEWS_KEY}&lang=${lang}&max=${max}`;
   const r = await fetch(url);
   const j = await r.json();
   if (!j.articles) return [];
@@ -466,16 +505,20 @@ async function processApiSources(region) {
       ? "india OR delhi OR mumbai"
       : "international";
   const all = [];
+
+  // prefer Hindi for Uttarakhand/India
+  const lang = region === "international" ? "en" : "hi";
+
   if (process.env.NEWSAPI_KEY) {
     try {
-      all.push(...(await fetchFromNewsAPI(q, 10)));
+      all.push(...(await fetchFromNewsAPI(q, 10, lang)));
     } catch (e) {
       console.warn("NewsAPI fail", e.message || e);
     }
   }
   if (process.env.GNEWS_KEY) {
     try {
-      all.push(...(await fetchFromGNews(q, 10)));
+      all.push(...(await fetchFromGNews(q, 10, lang)));
     } catch (e) {
       console.warn("GNews fail", e.message || e);
     }
@@ -489,12 +532,38 @@ async function processApiSources(region) {
         const { data: existing } = await supabase.from("ai_news").select("id").eq("source_url", url).limit(1).maybeSingle();
         if (existing) return;
 
-        const title = item.title || "No title";
-        const snippet = `${title}\n\n${item.description || ""}\n\nSource: ${url}`;
+        const titleOrig = item.title || "No title";
 
-        const aiResult = await rewriteWithParallel(snippet);
+        // fetch fuller body
+        let fetchedBody = null;
+        try {
+          fetchedBody = await fetchArticleBody(url);
+        } catch (e) {
+          fetchedBody = null;
+        }
+
+        const sourceSnippet = (item.description || "").trim();
+        const contextForAI = (fetchedBody && fetchedBody.length > 200) ? fetchedBody : sourceSnippet || titleOrig;
+
+        const prompt = buildRewritePromptHindi({ sourceTitle: titleOrig, sourceUrl: url, sourceText: contextForAI });
+
+        const aiResult = await rewriteWithParallel(prompt);
         const aiOut = aiResult.text;
         const providerUsed = aiResult.provider;
+
+        // try to parse HEADLINE:
+        let finalTitle = titleOrig;
+        let finalContent = aiOut || "";
+
+        const headlineMatch = String(aiOut || "").match(/HEADLINE:\s*(.+)/i);
+        if (headlineMatch && headlineMatch[1]) {
+          finalTitle = headlineMatch[1].trim();
+          // remove the HEADLINE line from content if present
+          finalContent = String(aiOut).replace(/HEADLINE:\s*.+(\r?\n){1,2}/i, "").trim();
+        }
+
+        // fallback: if content empty, use aiOut as-is
+        if (!finalContent) finalContent = aiOut;
 
         let genre = "Other";
         if (process.env.HUGGINGFACE_API_KEY) {
@@ -504,24 +573,24 @@ async function processApiSources(region) {
             const cr = await fetch(cUrl, {
               method: "POST",
               headers: { Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ inputs: aiOut, parameters: { candidate_labels: GENRE_CANDIDATES.slice(0, 10), multi_label: false } })
+              body: JSON.stringify({ inputs: finalContent, parameters: { candidate_labels: GENRE_CANDIDATES.slice(0, 10), multi_label: false } })
             });
             const cj = await cr.json();
             if (cj?.labels && cj.labels.length) genre = cj.labels[0];
           } catch (e) {
-            genre = detectGenreKeyword(aiOut);
+            genre = detectGenreKeyword(finalContent);
           }
-        } else genre = detectGenreKeyword(aiOut);
+        } else genre = detectGenreKeyword(finalContent);
 
         const sourceHost = (url && new URL(url).hostname) || "";
-        const regionDetected = detectRegionFromText(`${title}\n${aiOut}`, sourceHost);
+        const regionDetected = detectRegionFromText(`${titleOrig}\n${finalContent}`, sourceHost);
 
         const record = {
-          title,
-          slug: makeSlug(title),
+          title: finalTitle,
+          slug: makeSlug(finalTitle),
           source_url: url,
-          ai_content: aiOut,
-          short_desc: (aiOut || "").slice(0, 220) + "...",
+          ai_content: finalContent,
+          short_desc: (finalContent || "").slice(0, 220) + "...",
           image_url: item.image || null,
           published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
           region: regionDetected,
@@ -531,7 +600,7 @@ async function processApiSources(region) {
 
         const { error } = await supabase.from("ai_news").insert(record);
         if (error) console.warn("Insert error (API):", error.message || error);
-        else console.log("✅ Inserted (API):", title, "via", providerUsed);
+        else console.log("✅ Inserted (API):", finalTitle, "via", providerUsed, `(${countWords(finalContent)} words)`);
       } catch (err) {
         console.warn("API item processing error:", err.message || err);
       }
@@ -564,12 +633,35 @@ async function processFeeds(feedList, region) {
             if (existing) return;
 
             let image = item.enclosure?.url || item["media:content"]?.url || null;
-            const title = item.title || "No title";
-            const rawForAI = `${title}\n\n${item.contentSnippet || item.content || item.description || ""}\n\nSource URL: ${url}`;
+            const titleOrig = item.title || "No title";
 
-            const aiResult = await rewriteWithParallel(rawForAI);
+            // fetch fuller body
+            let fetchedBody = null;
+            try {
+              fetchedBody = await fetchArticleBody(url);
+            } catch (e) {
+              fetchedBody = null;
+            }
+
+            const sourceSnippet = (item.contentSnippet || item.content || item.description || "").trim();
+            const contextForAI = (fetchedBody && fetchedBody.length > 200) ? fetchedBody : sourceSnippet || titleOrig;
+
+            const prompt = buildRewritePromptHindi({ sourceTitle: titleOrig, sourceUrl: url, sourceText: contextForAI });
+
+            const aiResult = await rewriteWithParallel(prompt);
             const aiText = aiResult.text;
             const providerUsed = aiResult.provider;
+
+            // parse HEADLINE:
+            let finalTitle = titleOrig;
+            let finalContent = aiText || "";
+
+            const headlineMatch = String(aiText || "").match(/HEADLINE:\s*(.+)/i);
+            if (headlineMatch && headlineMatch[1]) {
+              finalTitle = headlineMatch[1].trim();
+              finalContent = String(aiText).replace(/HEADLINE:\s*.+(\r?\n){1,2}/i, "").trim();
+            }
+            if (!finalContent) finalContent = aiText;
 
             let genre = "Other";
             if (process.env.HUGGINGFACE_API_KEY) {
@@ -579,24 +671,24 @@ async function processFeeds(feedList, region) {
                 const cr = await fetch(cUrl, {
                   method: "POST",
                   headers: { Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({ inputs: aiText, parameters: { candidate_labels: GENRE_CANDIDATES.slice(0, 10), multi_label: false } })
+                  body: JSON.stringify({ inputs: finalContent, parameters: { candidate_labels: GENRE_CANDIDATES.slice(0, 10), multi_label: false } })
                 });
                 const cj = await cr.json();
                 if (cj?.labels && cj.labels.length) genre = cj.labels[0];
               } catch (e) {
-                genre = detectGenreKeyword(aiText);
+                genre = detectGenreKeyword(finalContent);
               }
-            } else genre = detectGenreKeyword(aiText);
+            } else genre = detectGenreKeyword(finalContent);
 
             const sourceHost = (url && new URL(url).hostname) || "";
-            const regionDetected = detectRegionFromText(`${title}\n${aiText}`, sourceHost);
+            const regionDetected = detectRegionFromText(`${titleOrig}\n${finalContent}`, sourceHost);
 
             const record = {
-              title,
-              slug: makeSlug(title),
+              title: finalTitle,
+              slug: makeSlug(finalTitle),
               source_url: url,
-              ai_content: aiText,
-              short_desc: (aiText || "").slice(0, 220) + "...",
+              ai_content: finalContent,
+              short_desc: (finalContent || "").slice(0, 220) + "...",
               image_url: image,
               published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
               region: regionDetected,
@@ -606,7 +698,7 @@ async function processFeeds(feedList, region) {
 
             const { error } = await supabase.from("ai_news").insert(record);
             if (error) console.warn("Insert error (RSS):", error.message || error);
-            else console.log("✅ Inserted (RSS):", title, "via", providerUsed);
+            else console.log("✅ Inserted (RSS):", finalTitle, "via", providerUsed, `(${countWords(finalContent)} words)`);
           } catch (e) {
             console.warn("RSS item error:", e.message || e);
           }
@@ -830,3 +922,5 @@ app.listen(PORT, () => {
   console.log(`🧹 Cleanup Interval: ${CLEANUP_HOURS} hours`);
   console.log(`🤖 Providers: ${providers.map((p) => p.name).join(", ")}`);
 });
+
+/* -------------------- END -------------------- */
