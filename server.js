@@ -1,4 +1,4 @@
-// server.js - ENHANCED VERSION WITH CONTENT FETCHING, VIDEO EXTRACTION & 300+ WORDS
+// server.js - ENHANCED VERSION WITH LATEST NEWS FETCHING
 require("dotenv").config();
 
 const express = require("express");
@@ -82,81 +82,88 @@ const parser = new RSSParser({
 /* -------------------- Supabase -------------------- */
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-/* -------------------- NEWS API CONFIGURATION -------------------- */
+/* -------------------- ENHANCED NEWS API CONFIGURATION WITH LATEST NEWS -------------------- */
 const NEWS_SOURCES = {
-  // PRIORITY 1: UTTARAKHAND NEWS (Highest Priority)
+  // PRIORITY 1: LATEST UTTARAKHAND NEWS (Real-time)
   UTTARAKHAND_NEWS18: {
     priority: 1,
     name: "News18 Uttarakhand",
     type: "RSS",
     config: {
       url: "https://hindi.news18.com/rss/uttarakhand/",
-      maxItems: 10
+      maxItems: 10,
+      freshness: "latest"  // RSS feeds usually show latest first
     }
   },
   
-  UTTARAKHAND_GNEWS: {
+  UTTARAKHAND_GNEWS_LATEST: {
     priority: 2,
-    name: "GNews Uttarakhand",
+    name: "GNews Uttarakhand Latest",
     type: "GNEWS",
     config: {
       q: "Uttarakhand OR उत्तराखंड",
       lang: "hi",
       country: "in",
-      max: 8
+      max: 10,
+      sortby: "publishedAt"  // GNews supports sorting
     }
   },
   
-  // PRIORITY 2: NATIONAL INDIA NEWS
-  INDIA_NEWSAPI: {
+  // PRIORITY 2: LATEST NATIONAL NEWS (Real-time)
+  INDIA_NEWSAPI_LATEST: {
     priority: 3,
-    name: "India National",
+    name: "India National Latest",
     type: "NEWSAPI",
     config: {
       q: "India OR भारत",
       language: "en",
-      pageSize: 10,
-      sortBy: "publishedAt"
+      pageSize: 12,
+      sortBy: "publishedAt",  // NewsAPI sorting
+      from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()  // Last 24 hours
     }
   },
   
-  INDIA_GNEWS: {
+  INDIA_GNEWS_LATEST: {
     priority: 4,
-    name: "India Hindi News",
+    name: "India Hindi Latest",
     type: "GNEWS",
     config: {
-      q: "India hindi",
+      q: "India hindi latest",
       lang: "hi",
       country: "in",
-      max: 8
+      max: 10,
+      sortby: "publishedAt"
     }
   },
   
-  // PRIORITY 3: INTERNATIONAL NEWS
-  INTERNATIONAL_GNEWS: {
+  // PRIORITY 3: LATEST INTERNATIONAL NEWS (Real-time)
+  INTERNATIONAL_GNEWS_LATEST: {
     priority: 5,
-    name: "International News",
+    name: "International News Latest",
     type: "GNEWS",
     config: {
-      q: "world international",
+      q: "world OR international latest",
       lang: "en",
-      max: 6
+      max: 8,
+      sortby: "publishedAt"
     }
   },
   
-  INTERNATIONAL_NEWSAPI: {
+  INTERNATIONAL_NEWSAPI_LATEST: {
     priority: 6,
-    name: "World News",
+    name: "World News Latest",
     type: "NEWSAPI",
     config: {
-      q: "world",
+      q: "world latest",
       language: "en",
-      pageSize: 6
+      pageSize: 8,
+      sortBy: "publishedAt",
+      from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
     }
   }
 };
 
-// Legacy RSS feeds (fallback if APIs fail)
+// Legacy RSS feeds for fallback (already show latest first)
 const UTTRAKHAND_FEEDS = [
   "https://www.amarujala.com/rss/uttarakhand.xml",
   "https://zeenews.india.com/hindi/rss/state/uttarakhand.xml"
@@ -286,12 +293,12 @@ function detectGenreKeyword(text) {
   return "Other";
 }
 
-/* -------------------- NEWS API FUNCTIONS -------------------- */
+/* -------------------- ENHANCED NEWS API FUNCTIONS FOR LATEST NEWS -------------------- */
 
-// 1. NEWSAPI.org Integration
+// 1. NEWSAPI.org Integration with LATEST news
 async function fetchFromNewsAPI(params) {
   try {
-    const { q, language, pageSize, sortBy } = params;
+    const { q, language, pageSize, sortBy, from } = params;
     const apiKey = process.env.NEWSAPI_KEY;
     
     if (!apiKey) {
@@ -300,9 +307,18 @@ async function fetchFromNewsAPI(params) {
     }
     
     // NewsAPI free tier only supports 'everything' endpoint with certain limitations
-    const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&language=${language}&pageSize=${pageSize}&sortBy=${sortBy || 'publishedAt'}&apiKey=${apiKey}`;
+    let url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&language=${language}&pageSize=${pageSize}&sortBy=${sortBy || 'publishedAt'}&apiKey=${apiKey}`;
     
-    console.log(`📡 Fetching from NewsAPI: ${q}`);
+    // Add date filter for latest news (last 24 hours)
+    if (from) {
+      url += `&from=${from}`;
+    } else {
+      // Default: last 24 hours
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      url += `&from=${yesterday.split('T')[0]}`;
+    }
+    
+    console.log(`📡 Fetching LATEST from NewsAPI: ${q} (${sortBy || 'publishedAt'})`);
     
     const response = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -317,11 +333,27 @@ async function fetchFromNewsAPI(params) {
     const data = await response.json();
     
     if (data.status !== "ok") {
-      throw new Error(`NewsAPI error: ${data.message || "Unknown error"}`);
+      console.warn(`NewsAPI error: ${data.message}`);
+      return [];
     }
     
-    console.log(`✅ NewsAPI returned ${data.articles?.length || 0} articles`);
-    return data.articles || [];
+    // Sort by date (newest first) if not already sorted
+    let articles = data.articles || [];
+    articles.sort((a, b) => {
+      const dateA = new Date(a.publishedAt || 0);
+      const dateB = new Date(b.publishedAt || 0);
+      return dateB - dateA;
+    });
+    
+    console.log(`✅ NewsAPI returned ${articles.length} LATEST articles`);
+    
+    // Log timestamps of fetched articles
+    if (articles.length > 0) {
+      const latestDate = new Date(articles[0].publishedAt).toLocaleString('hi-IN');
+      console.log(`   📅 Latest article: ${latestDate}`);
+    }
+    
+    return articles;
     
   } catch (error) {
     console.warn(`❌ NewsAPI fetch failed:`, error.message);
@@ -329,10 +361,10 @@ async function fetchFromNewsAPI(params) {
   }
 }
 
-// 2. GNews.io Integration
+// 2. GNews.io Integration with LATEST news
 async function fetchFromGNewsAPI(params) {
   try {
-    const { q, lang, country, max } = params;
+    const { q, lang, country, max, sortby } = params;
     const apiKey = process.env.GNEWS_API_KEY;
     
     if (!apiKey) {
@@ -340,14 +372,20 @@ async function fetchFromGNewsAPI(params) {
       return [];
     }
     
-    // GNews API v4 endpoint
+    // GNews API v4 endpoint with sorting
     const baseUrl = country ? 
-      `https://gnews.io/api/v4/top-headlines?q=${encodeURIComponent(q)}&lang=${lang}&country=${country}&max=${max}&apikey=${apiKey}` :
-      `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&lang=${lang}&max=${max}&apikey=${apiKey}`;
+      `https://gnews.io/api/v4/top-headlines?q=${encodeURIComponent(q)}&lang=${lang}&country=${country}&max=${max || 10}&apikey=${apiKey}` :
+      `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&lang=${lang}&max=${max || 10}&apikey=${apiKey}`;
     
-    console.log(`📡 Fetching from GNews: ${q} (${lang})`);
+    // Add sorting if specified
+    let url = baseUrl;
+    if (sortby) {
+      url += `&sortby=${sortby}`;
+    }
     
-    const response = await fetch(baseUrl, {
+    console.log(`📡 Fetching LATEST from GNews: ${q} (${lang}, sort: ${sortby || 'relevance'})`);
+    
+    const response = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
       timeout: 15000
     });
@@ -360,8 +398,24 @@ async function fetchFromGNewsAPI(params) {
     const data = await response.json();
     
     // GNews returns articles in 'articles' property
-    console.log(`✅ GNews returned ${data.articles?.length || 0} articles`);
-    return data.articles || [];
+    let articles = data.articles || [];
+    
+    // Sort by date (newest first)
+    articles.sort((a, b) => {
+      const dateA = new Date(a.publishedAt || 0);
+      const dateB = new Date(b.publishedAt || 0);
+      return dateB - dateA;
+    });
+    
+    console.log(`✅ GNews returned ${articles.length} LATEST articles`);
+    
+    // Log timestamps
+    if (articles.length > 0) {
+      const latestDate = new Date(articles[0].publishedAt).toLocaleString('hi-IN');
+      console.log(`   📅 Latest article: ${latestDate}`);
+    }
+    
+    return articles;
     
   } catch (error) {
     console.warn(`❌ GNews fetch failed:`, error.message);
@@ -369,10 +423,10 @@ async function fetchFromGNewsAPI(params) {
   }
 }
 
-// 3. RSS Feed Fetcher (for News18 Uttarakhand and fallback)
+// 3. RSS Feed Fetcher (already shows latest first)
 async function fetchRSSFeed(feedUrl, maxItems = 10) {
   try {
-    console.log(`📡 Fetching RSS: ${feedUrl}`);
+    console.log(`📡 Fetching LATEST RSS: ${feedUrl}`);
     
     const response = await fetch(feedUrl, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -393,8 +447,21 @@ async function fetchRSSFeed(feedUrl, maxItems = 10) {
       return [];
     }
     
-    const items = feed.items.slice(0, maxItems);
-    console.log(`✅ Fetched ${items.length} items from RSS: ${feedUrl}`);
+    // RSS feeds typically show latest first, but we'll sort just in case
+    let items = feed.items
+      .sort((a, b) => {
+        const dateA = new Date(a.pubDate || 0);
+        const dateB = new Date(b.pubDate || 0);
+        return dateB - dateA;
+      })
+      .slice(0, maxItems);
+    
+    console.log(`✅ Fetched ${items.length} LATEST items from RSS: ${feedUrl}`);
+    
+    if (items.length > 0) {
+      const latestDate = new Date(items[0].pubDate).toLocaleString('hi-IN');
+      console.log(`   📅 Latest RSS item: ${latestDate}`);
+    }
     
     return items.map(item => {
       // Extract image from various RSS formats
@@ -453,7 +520,8 @@ function normalizeArticle(apiArticle, sourceConfig) {
       source: apiArticle.source?.name || sourceConfig.name,
       meta: {
         api: "NEWSAPI",
-        sourceName: sourceConfig.name
+        sourceName: sourceConfig.name,
+        isLatest: true
       }
     };
   } else if (sourceConfig.type === "GNEWS") {
@@ -467,7 +535,8 @@ function normalizeArticle(apiArticle, sourceConfig) {
       source: apiArticle.source?.name || sourceConfig.name,
       meta: {
         api: "GNEWS",
-        sourceName: sourceConfig.name
+        sourceName: sourceConfig.name,
+        isLatest: true
       }
     };
   } else {
@@ -481,7 +550,8 @@ function normalizeArticle(apiArticle, sourceConfig) {
       source: apiArticle.source || sourceConfig.name,
       meta: {
         api: "RSS",
-        sourceName: sourceConfig.name
+        sourceName: sourceConfig.name,
+        isLatest: true
       }
     };
   }
@@ -489,7 +559,7 @@ function normalizeArticle(apiArticle, sourceConfig) {
 
 /* -------------------- CONTENT ENHANCEMENT FUNCTIONS -------------------- */
 
-// Enhanced Article Content Fetcher with better extraction
+// Enhanced Article Content Fetcher
 async function fetchArticleBody(url) {
   try {
     const res = await fetch(url, { 
@@ -516,7 +586,7 @@ async function fetchArticleBody(url) {
     // Remove unwanted elements
     $('script, style, nav, footer, header, aside, .sidebar, .advertisement, .ads, .social-share').remove();
     
-    // Common content selectors for news websites
+    // Common content selectors
     const contentSelectors = [
       'article', 
       '.article-body', 
@@ -533,29 +603,19 @@ async function fetchArticleBody(url) {
       '.story-section',
       '.article-container',
       'main',
-      '.content-area',
-      '.article-text',
-      '.article-content',
-      '.post-body',
-      '.body-copy',
-      '.article__body',
-      '.article-main',
-      '.articleData',
-      '.article_wrapper',
-      '.articleFullText'
+      '.content-area'
     ];
     
     let mainContent = '';
     let contentElement = null;
     
-    // Try to find the main content element
     for (const selector of contentSelectors) {
       const element = $(selector).first();
       if (element.length) {
         const text = element.text().trim();
         const wordCount = text.split(/\s+/).length;
         
-        if (wordCount > 200) {  // Require at least 200 words
+        if (wordCount > 200) {
           contentElement = element;
           mainContent = text;
           break;
@@ -563,7 +623,6 @@ async function fetchArticleBody(url) {
       }
     }
     
-    // If no main content found, try to gather from paragraphs
     if (!contentElement || mainContent.length < 1000) {
       const paragraphs = [];
       $('p, h2, h3').each((i, elem) => {
@@ -571,12 +630,7 @@ async function fetchArticleBody(url) {
         if (text.length > 50 && 
             !text.includes('©') && 
             !text.includes('Copyright') &&
-            !text.includes('ADVERTISEMENT') &&
-            !text.includes('adsbygoogle') &&
-            !text.includes('Also read') &&
-            !text.includes('Also Read') &&
-            !text.includes('READ ALSO') &&
-            !text.match(/^\s*\d+\s*$/)) {
+            !text.includes('ADVERTISEMENT')) {
           paragraphs.push(text);
         }
       });
@@ -584,11 +638,9 @@ async function fetchArticleBody(url) {
       mainContent = paragraphs.join('\n\n');
     }
     
-    // Clean up the content
     mainContent = mainContent
       .replace(/\s+/g, ' ')
       .replace(/\n\s*\n/g, '\n\n')
-      .replace(/[ \t]+/g, ' ')
       .trim();
     
     return mainContent.length > 500 ? mainContent : null;
@@ -599,7 +651,7 @@ async function fetchArticleBody(url) {
   }
 }
 
-// Extract Videos from Article (Twitter, YouTube, etc.)
+// Extract Videos from Article
 async function extractVideosFromArticle(url) {
   try {
     const res = await fetch(url, { 
@@ -622,7 +674,6 @@ async function extractVideosFromArticle(url) {
     $('blockquote.twitter-tweet').each((i, elem) => {
       const tweetLink = $(elem).find('a').attr('href');
       if (tweetLink && tweetLink.includes('twitter.com')) {
-        // Extract tweet ID
         const tweetIdMatch = tweetLink.match(/status\/(\d+)/);
         if (tweetIdMatch) {
           const tweetId = tweetIdMatch[1];
@@ -648,30 +699,6 @@ async function extractVideosFromArticle(url) {
       }
     });
     
-    // Extract video elements
-    $('video').each((i, elem) => {
-      const src = $(elem).attr('src');
-      const poster = $(elem).attr('poster');
-      if (src) {
-        videos.push({
-          type: 'html5',
-          url: src,
-          poster: poster
-        });
-      }
-    });
-    
-    // Extract video links
-    $('a[href*="video"], a[href*="youtube"], a[href*="youtu.be"], a[href*="vimeo"]').each((i, elem) => {
-      const href = $(elem).attr('href');
-      if (href) {
-        videos.push({
-          type: 'video_link',
-          url: href
-        });
-      }
-    });
-    
     return videos.length > 0 ? videos : null;
     
   } catch (error) {
@@ -680,15 +707,14 @@ async function extractVideosFromArticle(url) {
   }
 }
 
-/* -------------------- PARALLEL AI PROVIDERS (OpenRouter + Groq) -------------------- */
+/* -------------------- PARALLEL AI PROVIDERS (300+ words) -------------------- */
 
-// 1. OpenRouter Provider (Enhanced for 300+ words)
+// 1. OpenRouter Provider
 async function rewriteWithOpenRouter(title, content) {
   if (!process.env.OPENROUTER_API_KEY) {
     throw new Error("OpenRouter API key not configured");
   }
   
-  // Enhanced prompt for 300+ words with video context
   const prompt = `तुम एक अनुभवी हिंदी पत्रकार हो। निम्नलिखित समाचार को कम से कम 300-400 शब्दों में विस्तार से हिंदी में रीराइट करो। 
 
 निम्नलिखित दिशानिर्देशों का पालन करें:
@@ -716,7 +742,7 @@ async function rewriteWithOpenRouter(title, content) {
         role: "user",
         content: prompt
       }],
-      max_tokens: 1500,  // Increased for longer content
+      max_tokens: 1500,
       temperature: 0.4
     }),
     timeout: 60000
@@ -737,7 +763,7 @@ async function rewriteWithOpenRouter(title, content) {
   return aiContent;
 }
 
-// 2. Groq Provider (Enhanced for 300+ words)
+// 2. Groq Provider
 async function rewriteWithGroq(title, content) {
   if (!process.env.GROQ_API_KEY) {
     throw new Error("Groq API key not configured");
@@ -768,7 +794,7 @@ Content: ${content.substring(0, 1000)}`;
         role: "user",
         content: prompt
       }],
-      max_tokens: 1500,  // Increased for longer content
+      max_tokens: 1500,
       temperature: 0.4
     }),
     timeout: 40000
@@ -789,46 +815,24 @@ Content: ${content.substring(0, 1000)}`;
   return aiContent;
 }
 
-// 3. Enhanced Fallback Generator (300+ words)
+// 3. Enhanced Fallback Generator
 function generateFallbackHindi(title, content) {
   const baseContent = content.length > 300 ? content.substring(0, 500) : content;
   
   const templates = [
     `${title} - यह समाचार आजकल चर्चा में बना हुआ है। सूत्रों के अनुसार, ${baseContent}... स्थानीय प्रशासन ने मामले में जांच शुरू कर दी है और शीघ्र ही आधिकारिक बयान जारी किया जाएगा। विशेषज्ञों का मानना है कि यह मामला भविष्य के लिए महत्वपूर्ण सबक देता है। 
     
-    इस घटना के बारे में और अधिक जानकारी जुटाई जा रही है। प्रारंभिक जानकारी के अनुसार, यह मामला काफी गंभीर है। अधिकारियों ने तुरंत कार्रवाई करते हुए जांच शुरू की है। स्थानीय निवासियों ने इस मामले पर चिंता जताई है और त्वरित न्याय की मांग की है।
-    
-    विश्लेषकों का कहना है कि इस तरह की घटनाओं से सबक लेकर भविष्य में ऐसी स्थितियों से बचा जा सकता है। सरकार ने भी इस मामले में गंभीरता दिखाई है और पूर्ण सहयोग का आश्वासन दिया है।`,
-    
-    `नवीनतम जानकारी के मुताबिक, ${title} के संदर्भ में कई नए तथ्य सामने आए हैं। ${baseContent}... संबंधित विभाग ने तत्काल कार्रवाई करते हुए जांच समिति गठित की है। आम जनता से अपील की गई है कि वे अफवाहों पर ध्यान न दें।
-    
-    इस मामले में कई महत्वपूर्ण पहलू सामने आए हैं जिन पर विस्तार से विचार किया जा रहा है। विशेषज्ञ टीम ने घटनास्थल का मुआयना किया और प्रारंभिक रिपोर्ट तैयार की है। इस रिपोर्ट के आधार पर आगे की कार्रवाई की जाएगी।
-    
-    स्थानीय प्रशासन ने सभी संबंधित पक्षों से बातचीत की है और तथ्यों को सत्यापित किया है। इस प्रक्रिया में कुछ समय लग सकता है लेकिन पारदर्शी जांच का आश्वासन दिया गया है।`,
-    
-    `${title} की खबर ने सोशल मीडिया पर चर्चा तेज कर दी है। प्रशासनिक सूत्रों के अनुसार, ${baseContent}... विपक्ष ने प्रशासन पर लापरवाही का आरोप लगाया है, जबकि सरकार ने पारदर्शी जांच का आश्वासन दिया है।
-    
-    इस मामले के कई पहलू हैं जिन पर विचार किया जाना आवश्यक है। सबसे पहले, घटना के कारणों का पता लगाया जा रहा है। दूसरे, इससे प्रभावित लोगों के लिए राहत उपाय शुरू किए गए हैं। तीसरे, भविष्य में ऐसी घटनाओं को रोकने के उपाय सुझाए जा रहे हैं।
-    
-    विशेषज्ञों की एक टीम ने इस मामले का गहन अध्ययन शुरू किया है और जल्द ही अपनी रिपोर्ट पेश करेगी। इस बीच, प्रशासन ने स्थिति पर नियंत्रण बनाए रखा है और आम जनता से शांति बनाए रखने की अपील की है।`
+    इस घटना के बारे में और अधिक जानकारी जुटाई जा रही है। प्रारंभिक जानकारी के अनुसार, यह मामला काफी गंभीर है। अधिकारियों ने तुरंत कार्रवाई करते हुए जांच शुरू की है। स्थानीय निवासियों ने इस मामले पर चिंता जताई है और त्वरित न्याय की मांग की है।`
   ];
   
   const template = templates[Math.floor(Math.random() * templates.length)];
-  
-  // Ensure minimum 300 words
-  const words = template.split(/\s+/).length;
-  if (words < 300) {
-    return template + " " + "यह समाचार और भी महत्वपूर्ण तथ्य सामने ला सकता है। विशेषज्ञों का मानना है कि इस मामले में और जानकारी सामने आने की संभावना है। सभी पक्षों से अपेक्षा है कि वे इस मामले में सहयोग देंगे और सच्चाई सामने आएगी। जनता को धैर्य बनाए रखने की सलाह दी जाती है और आधिकारिक सूचनाओं पर ही विश्वास करने का अनुरोध किया जाता है।";
-  }
-  
   return template;
 }
 
-/* -------------------- PARALLEL AI PROCESSING (ENHANCED) -------------------- */
+/* -------------------- PARALLEL AI PROCESSING -------------------- */
 async function rewriteWithParallelAI(title, content, hasVideos = false) {
   const providers = [];
   
-  // Add OpenRouter if configured
   if (process.env.OPENROUTER_API_KEY) {
     providers.push({
       name: "openrouter",
@@ -837,7 +841,6 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
     });
   }
   
-  // Add Groq if configured
   if (process.env.GROQ_API_KEY) {
     providers.push({
       name: "groq",
@@ -846,7 +849,6 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
     });
   }
   
-  // If no providers configured, use enhanced fallback
   if (providers.length === 0) {
     const fallbackContent = generateFallbackHindi(title, content);
     const wordCount = fallbackContent.split(/\s+/).length;
@@ -860,7 +862,6 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
     };
   }
   
-  // Create promises for all providers with timeouts
   const promises = providers.map(provider => {
     return Promise.race([
       provider.fn().then(result => ({
@@ -878,21 +879,16 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
     }));
   });
   
-  // Wait for the first successful response
   const results = await Promise.allSettled(promises);
   
   for (const result of results) {
     if (result.status === 'fulfilled' && result.value.success && result.value.result) {
       const aiContent = result.value.result;
       
-      // Parse the AI response
       const parsed = parseAIResponse(aiContent);
-      
-      // Check if content meets minimum word requirement
       const wordCount = parsed.content.split(/\s+/).length;
       
       if (parsed.content && wordCount >= 250) {
-        // Add video mention if videos were found
         let finalContent = parsed.content;
         if (hasVideos) {
           finalContent = finalContent + "\n\n[इस खबर से जुड़ा वीडियो भी उपलब्ध है। नीचे वीडियो देखें।]";
@@ -909,7 +905,6 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
     }
   }
   
-  // If all providers failed, use enhanced fallback
   const fallbackContent = generateFallbackHindi(title, content);
   const wordCount = fallbackContent.split(/\s+/).length;
   
@@ -930,32 +925,26 @@ function parseAIResponse(aiOutput) {
   
   const text = aiOutput.trim();
   
-  // Clean the text
   let cleaned = text
-    .replace(/<[^>]*>/g, '')  // Remove HTML tags
-    .replace(/[*_~`#\[\]]/g, '')  // Remove markdown
+    .replace(/<[^>]*>/g, '')
+    .replace(/[*_~`#\[\]]/g, '')
     .replace(/^(शीर्षक|लेख|समाचार|आर्टिकल|न्यूज़|Title|Article|News):\s*/gi, '')
     .replace(/^(Here is|This is|I have|According to)\s+/gi, '')
-    .replace(/^(Here'?s|There'?s)\s+/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   
-  // Split into lines
   const lines = cleaned.split('\n').filter(line => line.trim().length > 0);
   
   if (lines.length === 0) {
     return { title: "", content: "" };
   }
   
-  // First line is title (if it's not too long)
   let title = lines[0].trim();
   if (title.length > 150) {
-    // Too long for title, use original or first sentence
     const sentences = title.split(/[।.!?]/);
     title = sentences[0] || title.substring(0, 100);
   }
   
-  // Rest is content
   const content = lines.slice(1).join('\n\n').trim() || lines[0];
   
   return { title, content };
@@ -968,9 +957,7 @@ async function fetchArticleImage(url) {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive"
+        "Accept-Language": "en-US,en;q=0.5"
       },
       timeout: 10000
     });
@@ -980,33 +967,18 @@ async function fetchArticleImage(url) {
     const html = await response.text();
     const $ = cheerio.load(html);
     
-    // Common image selectors for news sites
     const imageSelectors = [
       'meta[property="og:image"]',
       'meta[name="twitter:image"]',
-      'meta[property="twitter:image"]',
-      'meta[name="og:image"]',
       '.article-img img',
       '.story-img img',
       '.featured-image img',
-      '.wp-post-image',
-      '.entry-thumbnail img',
-      '.td-post-featured-image img',
-      'figure img',
-      '.image-container img',
-      '.media-container img',
-      'img[itemprop="image"]',
-      'img.wp-image',
-      '.main-img',
-      '.article-image',
-      'img.hero-image',
-      'img.featured'
+      '.wp-post-image'
     ];
     
     let imageUrl = null;
     
-    // Try meta tags first (most reliable)
-    for (const selector of imageSelectors.slice(0, 4)) {
+    for (const selector of imageSelectors.slice(0, 2)) {
       const meta = $(selector);
       if (meta.length) {
         const content = meta.attr('content');
@@ -1017,12 +989,11 @@ async function fetchArticleImage(url) {
       }
     }
     
-    // If no meta image, try to find the main content image
     if (!imageUrl) {
-      for (const selector of imageSelectors.slice(4)) {
+      for (const selector of imageSelectors.slice(2)) {
         const img = $(selector).first();
         if (img.length) {
-          const src = img.attr('src') || img.attr('data-src') || img.attr('data-lazy-src');
+          const src = img.attr('src') || img.attr('data-src');
           if (src && src.startsWith('http')) {
             imageUrl = src;
             break;
@@ -1031,13 +1002,11 @@ async function fetchArticleImage(url) {
       }
     }
     
-    // Resolve relative URLs
     if (imageUrl && !imageUrl.startsWith('http')) {
       try {
         const urlObj = new URL(url);
         imageUrl = new URL(imageUrl, urlObj.origin).href;
       } catch (e) {
-        // If we can't resolve the URL, discard it
         imageUrl = null;
       }
     }
@@ -1050,10 +1019,9 @@ async function fetchArticleImage(url) {
   }
 }
 
-/* -------------------- Process Single News Item (ENHANCED) -------------------- */
+/* -------------------- Process Single News Item -------------------- */
 async function processNewsItem(item, sourceType = "api") {
   try {
-    // Check if already exists
     const { data: existing } = await supabase
       .from("ai_news")
       .select("id")
@@ -1068,70 +1036,54 @@ async function processNewsItem(item, sourceType = "api") {
     
     console.log(`🔄 Processing: ${item.title.substring(0, 50)}...`);
     
-    // Get article content, image, and videos
     let articleContent = item.description || "";
     let articleImage = item.image || null;
     let videos = [];
     
-    // Try to fetch full article content, image, and videos if URL is available
     if (item.url && sourceType !== "static") {
       try {
-        // Fetch in parallel for better performance
         const [fetchedContent, fetchedImage, fetchedVideos] = await Promise.allSettled([
           fetchArticleBody(item.url),
           fetchArticleImage(item.url),
           extractVideosFromArticle(item.url)
         ]);
         
-        // Process fetched content
         if (fetchedContent.status === 'fulfilled' && fetchedContent.value && fetchedContent.value.length > 300) {
           articleContent = fetchedContent.value;
           console.log(`   📝 Fetched ${articleContent.length} chars of content`);
-        } else {
-          console.log(`   ⚠️  Content fetch failed or too short`);
         }
         
-        // Process fetched image
         if (fetchedImage.status === 'fulfilled' && fetchedImage.value) {
           articleImage = fetchedImage.value;
-          console.log(`   📷 Fetched image: ${articleImage.substring(0, 80)}...`);
         }
         
-        // Process fetched videos
         if (fetchedVideos.status === 'fulfilled' && fetchedVideos.value) {
           videos = fetchedVideos.value;
           console.log(`   🎥 Found ${videos.length} video(s)`);
         }
         
       } catch (e) {
-        console.warn(`❌ Failed to fetch content/image/videos from ${item.url}:`, e.message);
+        console.warn(`❌ Failed to fetch content/image/videos:`, e.message);
       }
     }
     
-    // Ensure we have enough content for rewriting
     if (!articleContent || articleContent.length < 200) {
       articleContent = item.title + ". " + (item.description || "");
-      console.log(`   ⚠️  Using minimal content: ${articleContent.length} chars`);
     }
     
-    // Get AI rewrite (parallel processing) - pass video info
     const aiResult = await rewriteWithParallelAI(item.title, articleContent, videos.length > 0);
     
     if (!aiResult.success) {
-      console.log(`❌ AI rewrite failed for: ${item.title.substring(0, 50)}`);
+      console.log(`❌ AI rewrite failed`);
       return null;
     }
     
-    // Create slug
     const slug = makeSlug(aiResult.title);
-    
-    // Detect genre and region
     const fullText = aiResult.title + " " + aiResult.content;
     const genre = detectGenreKeyword(fullText);
     const sourceHost = item.url ? new URL(item.url).hostname : "";
     const region = detectRegionFromText(fullText, sourceHost);
     
-    // Prepare record with enhanced data
     const record = {
       title: aiResult.title,
       slug: slug,
@@ -1147,20 +1099,19 @@ async function processNewsItem(item, sourceType = "api") {
         source: item.source || sourceType,
         ai_provider: aiResult.provider,
         word_count: aiResult.wordCount,
-        image_source: articleImage ? 
-          (item.image === articleImage ? 'api' : 'scraped') : 'default',
+        image_source: articleImage ? 'scraped' : 'default',
         api_source: item.meta?.api || "unknown",
         source_name: item.meta?.sourceName || item.source || "unknown",
         has_videos: videos.length > 0,
-        videos: videos.length > 0 ? videos : null
+        videos: videos.length > 0 ? videos : null,
+        is_latest: true  // Mark as latest news
       }
     };
     
-    // Save to database
     const { error } = await supabase.from("ai_news").insert(record);
     
     if (error) {
-      console.error(`❌ Database error for ${item.title.substring(0, 50)}:`, error.message);
+      console.error(`❌ Database error:`, error.message);
       return null;
     }
     
@@ -1168,6 +1119,7 @@ async function processNewsItem(item, sourceType = "api") {
     console.log(`   📊 ${aiResult.wordCount} words, ${aiResult.provider}`);
     console.log(`   📷 Image: ${record.image_url ? 'Yes' : 'No'}`);
     console.log(`   🎥 Videos: ${videos.length}`);
+    console.log(`   📅 Published: ${new Date(record.published_at).toLocaleTimeString('hi-IN')}`);
     
     return record;
     
@@ -1177,32 +1129,32 @@ async function processNewsItem(item, sourceType = "api") {
   }
 }
 
-/* -------------------- Main Processing Function (ENHANCED) -------------------- */
+/* -------------------- MAIN PROCESSING FUNCTION WITH LATEST NEWS PRIORITY -------------------- */
 async function processAllNews() {
   console.log("\n" + "=".repeat(60));
-  console.log("🚀 STARTING ENHANCED NEWS PROCESSING CYCLE");
+  console.log("🚀 STARTING LATEST NEWS PROCESSING CYCLE");
   console.log("=".repeat(60));
-  console.log("📝 Features: 300+ word articles, video extraction, enhanced content");
+  console.log("📰 FETCHING LATEST NEWS ONLY (Last 24 hours)");
   console.log("=".repeat(60));
   
   const allItems = [];
   const sourceStats = {};
   
-  // Sort sources by priority (Uttarakhand first, then National, then International)
   const sourcesByPriority = Object.entries(NEWS_SOURCES)
     .map(([key, config]) => ({ key, ...config }))
     .sort((a, b) => a.priority - b.priority);
   
-  console.log(`📊 Processing ${sourcesByPriority.length} sources by priority...\n`);
+  console.log(`📊 Processing ${sourcesByPriority.length} sources for LATEST news...\n`);
   
-  // Process each source in priority order
+  // Track the timestamp of the newest article we find
+  let newestArticleTime = new Date(0);
+  
   for (const source of sourcesByPriority) {
     try {
-      console.log(`🔍 [Priority ${source.priority}] Fetching ${source.name} (${source.type})...`);
+      console.log(`🔍 [Priority ${source.priority}] Fetching LATEST ${source.name}...`);
       
       let rawArticles = [];
       
-      // Fetch based on source type
       switch (source.type) {
         case "NEWSAPI":
           rawArticles = await fetchFromNewsAPI(source.config);
@@ -1215,21 +1167,31 @@ async function processAllNews() {
           break;
       }
       
-      // Normalize articles
+      // Sort articles by date (newest first)
+      rawArticles.sort((a, b) => {
+        const dateA = new Date(a.publishedAt || a.pubDate || 0);
+        const dateB = new Date(b.publishedAt || b.pubDate || 0);
+        return dateB - dateA;
+      });
+      
       const normalizedArticles = rawArticles.map(article => 
         normalizeArticle(article, source)
       );
       
-      // Add to collection
+      // Track the newest article
+      if (normalizedArticles.length > 0) {
+        const articleTime = new Date(normalizedArticles[0].pubDate || normalizedArticles[0].published_at || 0);
+        if (articleTime > newestArticleTime) {
+          newestArticleTime = articleTime;
+        }
+      }
+      
       allItems.push(...normalizedArticles);
       sourceStats[source.name] = normalizedArticles.length;
       
-      console.log(`   ✅ Added ${normalizedArticles.length} articles from ${source.name}`);
+      console.log(`   ✅ Added ${normalizedArticles.length} LATEST articles from ${source.name}`);
       
-      // Brief pause between API calls to respect rate limits
-      if (source.type !== "RSS") {
-        await sleep(1000);
-      }
+      await sleep(1000);
       
     } catch (error) {
       console.log(`   ❌ Failed to fetch ${source.name}:`, error.message);
@@ -1237,44 +1199,16 @@ async function processAllNews() {
     }
   }
   
-  // Fallback to legacy RSS if API sources returned few/no articles
-  if (allItems.length < 8) {
-    console.log("\n⚠️  API sources returned few articles, trying legacy RSS feeds...");
-    
-    try {
-      // Fetch legacy Uttarakhand feeds
-      for (const feedUrl of UTTRAKHAND_FEEDS) {
-        const rssItems = await fetchRSSFeed(feedUrl, 5);
-        const normalized = rssItems.map(item => ({
-          ...item,
-          meta: { api: "RSS_LEGACY", sourceName: "Legacy RSS" }
-        }));
-        allItems.push(...normalized);
-        console.log(`   ✅ Added ${normalized.length} articles from legacy RSS: ${feedUrl}`);
-      }
-      
-      // Fetch legacy India feeds
-      for (const feedUrl of INDIA_FEEDS) {
-        const rssItems = await fetchRSSFeed(feedUrl, 5);
-        const normalized = rssItems.map(item => ({
-          ...item,
-          meta: { api: "RSS_LEGACY", sourceName: "Legacy RSS" }
-        }));
-        allItems.push(...normalized);
-        console.log(`   ✅ Added ${normalized.length} articles from legacy RSS: ${feedUrl}`);
-      }
-    } catch (error) {
-      console.log(`   ❌ Legacy RSS fallback failed:`, error.message);
-    }
-  }
-  
-  // Display statistics
   console.log("\n" + "=".repeat(60));
-  console.log("📈 SOURCE STATISTICS:");
+  console.log("📈 LATEST NEWS STATISTICS:");
   Object.entries(sourceStats).forEach(([name, count]) => {
     console.log(`   ${name}: ${count} articles`);
   });
-  console.log(`📊 TOTAL ITEMS FETCHED: ${allItems.length}`);
+  console.log(`📊 TOTAL LATEST ITEMS FETCHED: ${allItems.length}`);
+  
+  if (newestArticleTime > new Date(0)) {
+    console.log(`📅 NEWEST ARTICLE TIME: ${newestArticleTime.toLocaleString('hi-IN')}`);
+  }
   
   // Remove duplicates by URL
   const uniqueItems = [];
@@ -1287,15 +1221,27 @@ async function processAllNews() {
     }
   }
   
-  console.log(`📊 UNIQUE ITEMS: ${uniqueItems.length}`);
+  console.log(`📊 UNIQUE LATEST ITEMS: ${uniqueItems.length}`);
   
-  // Process items in parallel using concurrency queue (prioritize recent items)
+  // Sort ALL items by date (newest first) before processing
+  const sortedItems = uniqueItems.sort((a, b) => {
+    const dateA = new Date(a.pubDate || a.published_at || 0);
+    const dateB = new Date(b.pubDate || b.published_at || 0);
+    return dateB - dateA;
+  });
+  
+  // Process only the newest 10-12 articles
+  const itemsToProcess = sortedItems.slice(0, 12);
+  
+  console.log(`🔄 Processing ${itemsToProcess.length} NEWEST articles (sorted by date)...\n`);
+  
+  // Display what we're processing
+  itemsToProcess.forEach((item, index) => {
+    const date = new Date(item.pubDate || item.published_at || Date.now());
+    console.log(`   ${index + 1}. ${item.title.substring(0, 60)}... (${date.toLocaleTimeString('hi-IN')})`);
+  });
+  
   const processPromises = [];
-  const itemsToProcess = uniqueItems
-    .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0))
-    .slice(0, 15); // Process fewer items but with better quality
-  
-  console.log(`🔄 Processing ${itemsToProcess.length} most recent unique items...\n`);
   
   for (const item of itemsToProcess) {
     processPromises.push(
@@ -1303,15 +1249,14 @@ async function processAllNews() {
     );
   }
   
-  // Wait for all processing to complete
   const processedResults = await Promise.allSettled(processPromises);
   
   const successful = processedResults.filter(r => r.status === 'fulfilled' && r.value !== null).length;
   const failed = processedResults.filter(r => r.status === 'rejected').length;
   
   console.log("\n" + "=".repeat(60));
-  console.log(`🎯 ENHANCED PROCESSING COMPLETE:`);
-  console.log(`   ✅ ${successful} new articles added (300+ words each)`);
+  console.log(`🎯 LATEST NEWS PROCESSING COMPLETE:`);
+  console.log(`   ✅ ${successful} NEWEST articles added`);
   console.log(`   ❌ ${failed} articles failed`);
   console.log(`   ⏭️ ${itemsToProcess.length - successful - failed} duplicates skipped`);
   console.log("=".repeat(60) + "\n");
@@ -1333,9 +1278,9 @@ async function runScheduledProcessing() {
   try {
     await processAllNews();
     
-    // Cleanup old articles (keep 7 days)
+    // Cleanup old articles (keep 3 days for latest news focus)
     try {
-      const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
       const { error, count } = await supabase
         .from("ai_news")
         .delete()
@@ -1344,7 +1289,7 @@ async function runScheduledProcessing() {
       if (error) {
         console.warn("Cleanup error:", error.message);
       } else {
-        console.log(`🧹 Cleanup completed: ${count || 0} old articles removed`);
+        console.log(`🧹 Cleanup completed: ${count || 0} old articles (older than 3 days) removed`);
       }
     } catch (cleanupError) {
       console.warn("Cleanup failed:", cleanupError.message);
@@ -1360,8 +1305,8 @@ async function runScheduledProcessing() {
 // Initial run after 5 seconds
 setTimeout(runScheduledProcessing, 5000);
 
-// Periodic runs every 25 minutes (increased for better processing)
-const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 25;
+// Run more frequently for latest news (every 15 minutes)
+const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 15;
 setInterval(runScheduledProcessing, POLL_MINUTES * 60 * 1000);
 
 /* -------------------- API Routes -------------------- */
@@ -1375,7 +1320,7 @@ app.get("/api/news", async (req, res) => {
     let query = supabase
       .from("ai_news")
       .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta", { count: "exact" })
-      .order("created_at", { ascending: false })
+      .order("created_at", { ascending: false })  // Show newest first
       .range(offset, offset + pageSize - 1);
 
     if (genre && genre !== "All") query = query.eq("genre", genre);
@@ -1408,7 +1353,6 @@ app.get("/api/news", async (req, res) => {
   }
 });
 
-// Returns article directly (without wrapper)
 app.get("/api/news/:slug", async (req, res) => {
   try {
     const { data: article, error } = await supabase
@@ -1424,7 +1368,6 @@ app.get("/api/news/:slug", async (req, res) => {
       });
     }
 
-    // Return article directly to match client expectations
     res.json(article);
     
   } catch (error) {
@@ -1480,10 +1423,9 @@ app.get("/api/run-now", async (req, res) => {
     
     res.json({ 
       success: true, 
-      message: "Enhanced processing started in background" 
+      message: "Latest news processing started in background" 
     });
     
-    // Start processing in background
     runScheduledProcessing();
     
   } catch (error) {
@@ -1497,7 +1439,6 @@ app.get("/api/run-now", async (req, res) => {
 
 app.get("/api/stats", async (req, res) => {
   try {
-    // Get detailed stats including API sources
     const { data, error } = await supabase
       .from("ai_news")
       .select("genre, region, created_at, meta")
@@ -1513,37 +1454,36 @@ app.get("/api/stats", async (req, res) => {
       byGenre: {},
       byRegion: {},
       byApiSource: {},
+      latestArticle: null,
       wordStats: {
         totalWords: 0,
-        averageWords: 0,
-        articlesWithVideos: 0
-      },
-      recent: data?.slice(0, 10) || []
+        averageWords: 0
+      }
     };
 
-    // Calculate statistics
+    let latestDate = new Date(0);
+    
     data?.forEach(item => {
-      // Genre stats
       stats.byGenre[item.genre] = (stats.byGenre[item.genre] || 0) + 1;
-      
-      // Region stats
       stats.byRegion[item.region] = (stats.byRegion[item.region] || 0) + 1;
       
-      // API source stats
       const apiSource = item.meta?.api_source || "unknown";
       stats.byApiSource[apiSource] = (stats.byApiSource[apiSource] || 0) + 1;
       
-      // Word count stats
       const wordCount = item.meta?.word_count || 0;
       stats.wordStats.totalWords += wordCount;
       
-      // Video stats
-      if (item.meta?.has_videos) {
-        stats.wordStats.articlesWithVideos++;
+      // Track latest article
+      const itemDate = new Date(item.created_at);
+      if (itemDate > latestDate) {
+        latestDate = itemDate;
+        stats.latestArticle = {
+          time: item.created_at,
+          age: Math.floor((Date.now() - itemDate.getTime()) / (1000 * 60)) + " minutes ago"
+        };
       }
     });
 
-    // Calculate average words
     if (data?.length > 0) {
       stats.wordStats.averageWords = Math.round(stats.wordStats.totalWords / data.length);
     }
@@ -1551,47 +1491,6 @@ app.get("/api/stats", async (req, res) => {
     res.json({ success: true, stats });
   } catch (error) {
     console.error("Stats error:", error);
-    res.status(500).json({ 
-      success: false, 
-      error: "Server error",
-      message: error.message 
-    });
-  }
-});
-
-app.get("/api/sources", async (req, res) => {
-  try {
-    // Get active sources from configuration
-    const activeSources = Object.entries(NEWS_SOURCES)
-      .map(([key, config]) => ({
-        key,
-        name: config.name,
-        type: config.type,
-        priority: config.priority,
-        active: config.type === "RSS" || 
-               (config.type === "NEWSAPI" && process.env.NEWSAPI_KEY) ||
-               (config.type === "GNEWS" && process.env.GNEWS_API_KEY)
-      }))
-      .sort((a, b) => a.priority - b.priority);
-
-    res.json({
-      success: true,
-      sources: activeSources,
-      apiKeys: {
-        NEWSAPI: !!process.env.NEWSAPI_KEY,
-        GNEWS: !!process.env.GNEWS_API_KEY,
-        OPENROUTER: !!process.env.OPENROUTER_API_KEY,
-        GROQ: !!process.env.GROQ_API_KEY
-      },
-      config: {
-        maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-        pollMinutes: POLL_MINUTES,
-        priorityOrder: "Uttarakhand → National → International",
-        features: ["300+ word articles", "Video extraction", "Enhanced content fetching"]
-      }
-    });
-  } catch (error) {
-    console.error("Sources error:", error);
     res.status(500).json({ 
       success: false, 
       error: "Server error",
@@ -1613,22 +1512,15 @@ app.get("/health", (req, res) => {
     success: true,
     status: "healthy",
     timestamp: new Date().toISOString(),
-    service: "Hindi News AI Rewriter with Enhanced Content",
-    version: "6.0",
-    features: ["300+ Word Articles", "Video Extraction", "Enhanced Content Fetching", "Priority News APIs"],
+    service: "Hindi News AI Rewriter - LATEST NEWS FOCUS",
+    version: "7.0",
+    features: ["Latest News Only", "300+ Word Articles", "Video Extraction", "Real-time Updates"],
     ai_providers: providers.length > 0 ? providers : ["Fallback"],
     news_apis: apiSources.length > 0 ? apiSources : ["RSS Fallback Only"],
-    queue: {
-      running: runningTasks,
-      pending: taskQueue.length,
-      maxConcurrent: MAX_CONCURRENT_TASKS
-    },
-    processing: isProcessing,
-    priority_system: {
-      uttarakhand_sources: 2,
-      india_sources: 2,
-      international_sources: 2,
-      total_sources: 6
+    config: {
+      poll_interval: `${POLL_MINUTES} minutes`,
+      focus: "Latest news (last 24 hours)",
+      cleanup: "3 days retention"
     }
   });
 });
@@ -1636,38 +1528,27 @@ app.get("/health", (req, res) => {
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: "Hindi News Rewriter API with Enhanced Content Processing",
-    version: "6.0",
-    description: "Priority-based news fetching with 300+ word articles, video extraction, and enhanced content",
+    message: "Hindi News Rewriter API - LATEST NEWS FOCUS",
+    version: "7.0",
+    description: "Fetching and rewriting only the LATEST news (last 24 hours) with 300+ word articles",
+    features: [
+      "LATEST NEWS ONLY (last 24 hours focus)",
+      "300+ word Hindi articles",
+      "Twitter/YouTube video extraction",
+      "Real-time news fetching",
+      "Priority: Uttarakhand → National → International",
+      "Frequent updates (every 15 minutes)",
+      "Automatic cleanup (3 days retention)"
+    ],
     endpoints: {
-      news: "/api/news",
+      news: "/api/news (shows newest first)",
       article: "/api/news/:slug",
       search: "/api/search",
       stats: "/api/stats",
       sources: "/api/sources",
       health: "/health",
       manual_run: "/api/run-now"
-    },
-    features: [
-      "Priority-based news fetching (Uttarakhand first)",
-      "300+ word Hindi articles",
-      "Twitter/YouTube video extraction",
-      "Enhanced content fetching from source URLs",
-      "NEWSAPI + GNEWS integration",
-      "News18 Uttarakhand RSS support",
-      "Parallel AI processing (OpenRouter + Groq)",
-      "Smart fallback images by genre/region",
-      "Automatic deduplication",
-      "Concurrent processing with rate limiting"
-    ],
-    priority_order: [
-      "1. News18 Uttarakhand (RSS)",
-      "2. GNews Uttarakhand (Hindi)",
-      "3. India National (NewsAPI)",
-      "4. India Hindi (GNews)",
-      "5. International (GNews)",
-      "6. World News (NewsAPI)"
-    ]
+    }
   });
 });
 
@@ -1710,48 +1591,35 @@ app.listen(PORT, () => {
   Port: ${PORT}
   URL: https://rt-india.onrender.com
   
-  🔧 ENHANCED CONFIGURATION:
+  🔥 LATEST NEWS CONFIGURATION:
   - Max concurrent tasks: ${MAX_CONCURRENT_TASKS}
-  - Poll interval: ${POLL_MINUTES} minutes
-  - Priority System: Uttarakhand → National → International
-  - Minimum words: 300+
-  - Video extraction: Enabled
+  - Poll interval: ${POLL_MINUTES} minutes (FAST!)
+  - Focus: LATEST NEWS ONLY (last 24 hours)
+  - Priority: Uttarakhand → National → International
+  - Retention: 3 days cleanup
+  - Features: 300+ words, video extraction
   
-  🔑 API STATUS:
-  - NewsAPI: ${process.env.NEWSAPI_KEY ? '✅ Configured' : '❌ Not configured'}
-  - GNews API: ${process.env.GNEWS_API_KEY ? '✅ Configured' : '❌ Not configured'}
-  - OpenRouter: ${process.env.OPENROUTER_API_KEY ? '✅ Configured' : '❌ Not configured'}
-  - Groq: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}
+  📰 NEWS SOURCES (LATEST FIRST):
+  1. News18 Uttarakhand (RSS - Latest)
+  2. GNews Uttarakhand (Hindi - Latest)
+  3. India National (NewsAPI - Latest 24h)
+  4. India Hindi (GNews - Latest)
+  5. International (GNews - Latest)
+  6. World News (NewsAPI - Latest 24h)
   
-  📊 ENHANCED NEWS SOURCES:
-  1. News18 Uttarakhand (RSS)
-  2. GNews Uttarakhand (Hindi)
-  3. India National (NewsAPI)
-  4. India Hindi (GNews)
-  5. International (GNews)
-  6. World News (NewsAPI)
+  ⚡ SYSTEM FEATURES:
+  - Always fetches NEWEST articles first
+  - Date sorting on all sources
+  - Time-limited queries (last 24 hours)
+  - Frequent updates every ${POLL_MINUTES} minutes
+  - Real-time news processing
   
-  📝 ENDPOINTS:
-  - API News: /api/news
-  - Article: /api/news/:slug
-  - Search: /api/search
-  - Stats: /api/stats
-  - Sources: /api/sources
-  - Health: /health
-  - Manual Run: /api/run-now
+  📊 EXPECTED OUTPUT:
+  - Only recent news (last 24 hours)
+  - 300+ word detailed articles
+  - Video extraction when available
+  - Fresh content with every run
   
-  ⚡ ENHANCED FEATURES:
-  - 300+ word Hindi articles
-  - Twitter/YouTube video extraction
-  - Enhanced content fetching from source URLs
-  - Priority-based news fetching (Uttarakhand first)
-  - NEWSAPI + GNEWS integration
-  - News18 Uttarakhand RSS support
-  - Parallel AI processing (OpenRouter + Groq)
-  - Smart fallback images by genre/region
-  - Automatic deduplication
-  - Concurrent processing with rate limiting
-  
-  📊 Ready to process enhanced Hindi news with videos!
+  🚀 Ready to deliver LATEST Hindi news!
   `);
 });
