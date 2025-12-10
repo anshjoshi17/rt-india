@@ -1,5 +1,6 @@
 // server.js
 require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
@@ -10,103 +11,93 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// -------------------- CORS CONFIGURATION FOR RENDER --------------------
+/**
+ * --------------------
+ * CORS: robust, applied EARLY
+ * --------------------
+ *
+ * Controls:
+ *  - CORS_ALLOW_ALL=true -> allows any origin (use with caution)
+ *  - CORS_ALLOW_CREDENTIALS=true -> allows credentials (cookies) and will echo origin (never use '*' with credentials)
+ *  - ADDITIONAL_ALLOWED_ORIGINS -> comma-separated extra origins
+ */
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://rt-india.com",
+  "https://www.rt-india.com",
+  "https://rt-india.onrender.com",
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:5173"
+];
+
+const extraOrigins = (process.env.ADDITIONAL_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const allowedOrigins = Array.from(new Set(DEFAULT_ALLOWED_ORIGINS.concat(extraOrigins)));
+
+const allowAll = String(process.env.CORS_ALLOW_ALL || "false").toLowerCase() === "true";
+const allowCredentials = String(process.env.CORS_ALLOW_CREDENTIALS || "false").toLowerCase() === "true";
+
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, postman)
+    // allow server-to-server or tools where origin is undefined
     if (!origin) return callback(null, true);
-    
-    // List of allowed origins for Render deployment
-    const allowedOrigins = [
-      'https://rt-india.onrender.com', // Your Render backend (for internal requests)
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'http://127.0.0.1:3000',
-      'http://127.0.0.1:5173',
-      // Add your frontend domains here when deployed
-      // 'https://your-frontend-domain.com',
-      // 'https://your-frontend.onrender.com',
-    ];
-    
-    // In production, you might want to allow all origins or specific ones
-    if (process.env.NODE_ENV === 'production') {
-      // For production, you can either:
-      // 1. Allow specific domains (recommended)
-      // 2. Allow all origins (use with caution)
-      
-      // Option 1: Specific domains (uncomment and modify as needed)
-      // if (allowedOrigins.includes(origin)) {
-      //   callback(null, true);
-      // } else {
-      //   callback(new Error('Not allowed by CORS'));
-      // }
-      
-      // Option 2: Allow all origins in production (temporary for testing)
-      callback(null, true);
-    } else {
-      // Development: Allow from allowedOrigins list
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
+
+    if (allowAll) {
+      // if credentials are allowed, we must echo the origin (cors package does that)
+      return callback(null, true);
     }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error("Not allowed by CORS: " + origin));
   },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  maxAge: 86400, // 24 hours
-  optionsSuccessStatus: 200
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Accept",
+    "Cache-Control",
+    "Pragma",
+    "X-Requested-With",
+    "Origin",
+    "X-CSRF-Token"
+  ],
+  exposedHeaders: ["Content-Range", "X-Content-Range"],
+  credentials: allowCredentials,
+  maxAge: 86400 // 24 hours
 };
 
-// Apply CORS middleware
+// Apply CORS as the very first middleware (before routes, before body parsers)
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // preflight handler for all routes
 
-// Handle preflight requests globally
-app.options('*', cors(corsOptions));
-
-// Security headers for Render
+// Basic security headers (do not override CORS headers set by cors())
 app.use((req, res, next) => {
-  // Render-specific headers
-  res.header('X-Content-Type-Options', 'nosniff');
-  res.header('X-Frame-Options', 'DENY');
-  res.header('X-XSS-Protection', '1; mode=block');
-  
-  // CORS headers
-  const origin = req.headers.origin;
-  if (origin) {
-    res.header('Access-Control-Allow-Origin', origin);
-  }
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-CSRF-Token');
-  res.header('Access-Control-Expose-Headers', 'Content-Range, X-Content-Range');
-  res.header('Access-Control-Max-Age', '86400');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
+  res.header("X-Content-Type-Options", "nosniff");
+  res.header("X-Frame-Options", "DENY");
+  res.header("X-XSS-Protection", "1; mode=block");
   next();
 });
 
-// Body parsing middleware
+// Body parsing (after CORS so preflight isn't messed up)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+/* -------------------- RSS parser -------------------- */
 const parser = new RSSParser({
   customFields: { item: ["media:content", "enclosure"] }
 });
 
-// -------------------- SUPABASE --------------------
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+/* -------------------- SUPABASE -------------------- */
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// -------------------- FEEDS --------------------
+/* -------------------- FEEDS -------------------- */
 const UTTRAKHAND_FEEDS = [
   "https://www.amarujala.com/rss/uttarakhand.xml",
   "https://zeenews.india.com/hindi/rss/state/uttarakhand.xml"
@@ -117,7 +108,7 @@ const INDIA_FEEDS = [
   "https://aajtak.intoday.in/rssfeeds/?id=home"
 ];
 
-// -------------------- UTILS --------------------
+/* -------------------- UTILS -------------------- */
 function makeSlug(text) {
   return (
     slugify(String(text || "").slice(0, 120), { lower: true, strict: true }) +
@@ -131,8 +122,8 @@ function sanitizeXml(xml) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// -------------------- CONCURRENCY QUEUE --------------------
-const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS) || 2; // Reduced for Render free tier
+/* -------------------- CONCURRENCY QUEUE -------------------- */
+const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS) || 2; // tuned for Render
 let running = 0;
 const queue = [];
 function enqueueTask(fn) {
@@ -146,7 +137,8 @@ function runNext() {
   const item = queue.shift();
   if (!item) return;
   running++;
-  item.fn()
+  item
+    .fn()
     .then((v) => item.resolve(v))
     .catch((e) => item.reject(e))
     .finally(() => {
@@ -155,7 +147,7 @@ function runNext() {
     });
 }
 
-// -------------------- DETECTION HELPERS --------------------
+/* -------------------- DETECTION HELPERS -------------------- */
 const GENRE_CANDIDATES = [
   "Politics",
   "Crime",
@@ -173,7 +165,19 @@ const GENRE_CANDIDATES = [
 function detectRegionFromText(text, sourceHost = "") {
   const t = (text || "").toLowerCase();
   const s = (sourceHost || "").toLowerCase();
-  const uttKeywords = ["uttarakhand", "dehradun", "nainital", "almora", "pithoragarh", "rudraprayag", "chamoli", "pauri", "champawat", "haridwar", "rishikesh"];
+  const uttKeywords = [
+    "uttarakhand",
+    "dehradun",
+    "nainital",
+    "almora",
+    "pithoragarh",
+    "rudraprayag",
+    "chamoli",
+    "pauri",
+    "champawat",
+    "haridwar",
+    "rishikesh"
+  ];
   if (uttKeywords.some((k) => t.includes(k) || s.includes(k))) return "uttarakhand";
   const indiaKeywords = ["india", "delhi", "mumbai", "kolkata", "chennai", "bengaluru"];
   if (indiaKeywords.some((k) => t.includes(k) || s.includes(k))) return "india";
@@ -195,12 +199,10 @@ function detectGenreKeyword(text) {
   return "Other";
 }
 
-// -------------------- PUTER (NODE) INIT - Claude-ready --------------------
+/* -------------------- PUTER (NODE) INIT - Claude-ready -------------------- */
 let puter = null;
 try {
-  // try common package paths so requiring works across installs
   try {
-    // preferred: official npm package
     puter = require("@heyputer/puter.js");
     if (puter?.init) {
       puter = puter.init ? puter.init(process.env.PUTER_AUTH_TOKEN || null) : puter;
@@ -208,7 +210,6 @@ try {
       puter = puter.default.init ? puter.default.init(process.env.PUTER_AUTH_TOKEN || null) : puter.default;
     }
   } catch (e) {
-    // fallback to specific path (older packaging)
     const pInit = require("@heyputer/puter.js/src/init.cjs");
     puter = pInit.init ? pInit.init(process.env.PUTER_AUTH_TOKEN || null) : null;
   }
@@ -218,8 +219,8 @@ try {
   console.warn("Puter.js not available or failed to init:", e?.message || e);
 }
 
-// -------------------- AI PROVIDERS (wrappers) --------------------
-// Each wrapper returns rewritten text or throws.
+/* -------------------- AI PROVIDER WRAPPERS -------------------- */
+// (Kept mostly unchanged from your original — adjust / secure keys in env)
 async function deepseekRewrite(text) {
   if (!process.env.DEEPSEEK_API_KEY) throw new Error("DeepSeek not configured");
   const r = await fetch("https://api.deepseek.com/chat/completions", {
@@ -288,30 +289,23 @@ async function geminiRewrite(text) {
   return cand;
 }
 
-// --------- Puter provider wrapper (supports Claude models) ----------
 async function puterRewrite(text) {
   if (!puter) throw new Error("Puter not initialized");
-  // use PUTER_MODEL env to allow selecting Claude or other Puter-supported models
-  const model = process.env.PUTER_MODEL || "claude-sonnet-4-5"; // default to Claude Sonnet (per your request)
-  // puter.ai.chat can be used with (prompt, options) or (content, media, options)
+  const model = process.env.PUTER_MODEL || "claude-sonnet-4-5";
   const options = { model, stream: false, temperature: Number(process.env.PUTER_TEMPERATURE || 0.0) };
-  // Some Puter SDK builds return a promise directly; some return an iterable when stream=true.
   const resp = await puter.ai.chat(text, options);
-  // normalize common shapes
   if (typeof resp === "string") return resp;
   if (resp?.message?.content && Array.isArray(resp.message.content) && resp.message.content[0]?.text) {
-    // Puter Claude shape: resp.message.content[0].text
     return resp.message.content[0].text;
   }
   if (resp?.message?.content && typeof resp.message.content === "string") {
     return resp.message.content;
   }
   if (resp?.text) return resp.text;
-  // fallback stringify
   return String(resp);
 }
 
-// -------------------- PROVIDER REGISTRY --------------------
+/* -------------------- PROVIDER REGISTRY -------------------- */
 const providers = [
   { name: "puter", fn: puterRewrite, enabled: !!puter },
   { name: "huggingface", fn: hfRewrite, enabled: !!process.env.HUGGINGFACE_API_KEY },
@@ -320,21 +314,19 @@ const providers = [
   { name: "gemini", fn: geminiRewrite, enabled: !!(process.env.GEMINI_API_KEY && process.env.GEMINI_ENDPOINT) }
 ].filter((p) => p.enabled);
 
-// -------------------- PARALLEL ORCHESTRATION --------------------
+/* -------------------- ORCHESTRATION & HELPERS -------------------- */
 function withTimeout(promise, ms, name) {
   const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${ms}ms (${name})`)), ms));
   return Promise.race([promise, timeout]);
 }
 
 async function rewriteWithParallel(text) {
-  if (!providers.length) {
-    return { text, provider: null, timed_out: false };
-  }
-  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 15000; // Reduced for Render
+  if (!providers.length) return { text, provider: null, timed_out: false };
+  const TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 15000;
   const attempts = providers.map((p) =>
     withTimeout(
       (async () => {
-        await sleep(Math.floor(Math.random() * 50)); // Reduced delay
+        await sleep(Math.floor(Math.random() * 50));
         const out = await p.fn(text);
         if (!out || String(out).trim().length < 10) throw new Error("empty output");
         return { text: String(out).trim(), provider: p.name };
@@ -348,12 +340,11 @@ async function rewriteWithParallel(text) {
     const result = await Promise.any(attempts);
     return { text: result.text, provider: result.provider, timed_out: false };
   } catch (agg) {
-    // all providers failed
     return { text, provider: null, timed_out: true, error: agg };
   }
 }
 
-// -------------------- RSS discovery --------------------
+/* -------------------- RSS DISCOVERY & FETCHERS -------------------- */
 async function discoverRSS(html, baseUrl) {
   try {
     const $ = cheerio.load(html);
@@ -365,27 +356,46 @@ async function discoverRSS(html, baseUrl) {
   }
 }
 
-// -------------------- NEWS API FETCHERS --------------------
-async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 10) { // Reduced for Render
+async function fetchFromNewsAPI(q = "uttarakhand OR dehradun", pageSize = 10) {
   if (!process.env.NEWSAPI_KEY) return [];
   const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&pageSize=${pageSize}&language=en&sortBy=publishedAt&apiKey=${process.env.NEWSAPI_KEY}`;
   const r = await fetch(url);
   const j = await r.json();
   if (!j.articles) return [];
-  return j.articles.map((a) => ({ title: a.title, link: a.url, pubDate: a.publishedAt, description: a.description || "", image: a.urlToImage || null, source: a.source?.name || null }));
+  return j.articles.map((a) => ({
+    title: a.title,
+    link: a.url,
+    pubDate: a.publishedAt,
+    description: a.description || "",
+    image: a.urlToImage || null,
+    source: a.source?.name || null
+  }));
 }
-async function fetchFromGNews(q = "uttarakhand", max = 10) { // Reduced for Render
+
+async function fetchFromGNews(q = "uttarakhand", max = 10) {
   if (!process.env.GNEWS_KEY) return [];
   const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&token=${process.env.GNEWS_KEY}&lang=en&max=${max}`;
   const r = await fetch(url);
   const j = await r.json();
   if (!j.articles) return [];
-  return j.articles.map((a) => ({ title: a.title, link: a.url, pubDate: a.publishedAt, description: a.description || "", image: a.image || null, source: a.source?.name || null }));
+  return j.articles.map((a) => ({
+    title: a.title,
+    link: a.url,
+    pubDate: a.publishedAt,
+    description: a.description || "",
+    image: a.image || null,
+    source: a.source?.name || null
+  }));
 }
 
-// -------------------- PROCESS API SOURCES --------------------
+/* -------------------- PROCESS API SOURCES -------------------- */
 async function processApiSources(region) {
-  const q = region === "uttarakhand" ? "uttarakhand OR dehradun OR nainital OR champawat OR haridwar" : region === "india" ? "india OR delhi OR mumbai" : "international";
+  const q =
+    region === "uttarakhand"
+      ? "uttarakhand OR dehradun OR nainital OR champawat OR haridwar"
+      : region === "india"
+      ? "india OR delhi OR mumbai"
+      : "international";
   const all = [];
   if (process.env.NEWSAPI_KEY) {
     try {
@@ -402,7 +412,7 @@ async function processApiSources(region) {
     }
   }
 
-  for (const item of all.slice(0, 20)) { // Process fewer items for Render
+  for (const item of all.slice(0, 20)) {
     enqueueTask(async () => {
       try {
         const url = item.link;
@@ -417,7 +427,6 @@ async function processApiSources(region) {
         const aiOut = aiResult.text;
         const providerUsed = aiResult.provider;
 
-        // genre detection (HF zero-shot if available)
         let genre = "Other";
         if (process.env.HUGGINGFACE_API_KEY) {
           try {
@@ -461,7 +470,7 @@ async function processApiSources(region) {
   }
 }
 
-// -------------------- PROCESS RSS FEEDS --------------------
+/* -------------------- PROCESS RSS FEEDS -------------------- */
 async function processFeeds(feedList, region) {
   for (const feed of feedList) {
     try {
@@ -477,7 +486,7 @@ async function processFeeds(feedList, region) {
       const rss = await parser.parseString(text);
       if (!rss.items) continue;
 
-      for (const item of rss.items.slice(0, 8)) { // Process fewer items
+      for (const item of rss.items.slice(0, 8)) {
         enqueueTask(async () => {
           try {
             const url = item.link || item.guid;
@@ -540,8 +549,8 @@ async function processFeeds(feedList, region) {
   }
 }
 
-// -------------------- CLEANUP --------------------
-async function cleanupOldArticles(days = 7) { // Increased to 7 days for Render
+/* -------------------- CLEANUP -------------------- */
+async function cleanupOldArticles(days = 7) {
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.warn("Skipping cleanup: SUPABASE_SERVICE_ROLE_KEY required.");
     return;
@@ -556,8 +565,7 @@ async function cleanupOldArticles(days = 7) { // Increased to 7 days for Render
   }
 }
 
-// -------------------- BOOTSTRAP & SCHEDULE --------------------
-// Initial run with delay for Render spin-up
+/* -------------------- BOOTSTRAP & SCHEDULE -------------------- */
 setTimeout(async () => {
   try {
     console.log("🚀 Initial run starting on Render...");
@@ -571,9 +579,9 @@ setTimeout(async () => {
   } catch (e) {
     console.error("Bootstrap error:", e.message || e);
   }
-}, 10000); // 10 second delay for Render spin-up
+}, 10000);
 
-const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 15; // Increased for Render free tier
+const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 15;
 setInterval(async () => {
   try {
     console.log(`🔄 Periodic run started on Render (every ${POLL_MINUTES} minutes)`);
@@ -588,36 +596,36 @@ setInterval(async () => {
   }
 }, POLL_MINUTES * 60 * 1000);
 
-const CLEANUP_HOURS = Number(process.env.CLEANUP_INTERVAL_HOURS) || 12; // Increased for Render
+const CLEANUP_HOURS = Number(process.env.CLEANUP_INTERVAL_HOURS) || 12;
 setInterval(async () => {
   console.log("🧹 Running cleanup on Render...");
   await cleanupOldArticles(Number(process.env.CLEANUP_DAYS) || 7);
 }, CLEANUP_HOURS * 60 * 60 * 1000);
 
-// -------------------- HTTP API --------------------
+/* -------------------- HTTP API -------------------- */
 app.get("/api/news", async (req, res) => {
   try {
     const { limit = 30, genre, region, page = 1 } = req.query;
     const pageSize = Math.min(Number(limit), 100);
     const pageNum = Math.max(Number(page), 1);
     const offset = (pageNum - 1) * pageSize;
-    
+
     let qb = supabase
       .from("ai_news")
-      .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at", { count: 'exact' })
+      .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at", { count: "exact" })
       .order("created_at", { ascending: false })
       .range(offset, offset + pageSize - 1);
-    
+
     if (genre) qb = qb.eq("genre", genre);
     if (region) qb = qb.eq("region", region);
-    
+
     const { data, error, count } = await qb;
-    
+
     if (error) {
       console.error("Database error:", error);
       return res.status(500).json({ error: "Database error", message: error.message });
     }
-    
+
     res.json({
       data: data || [],
       pagination: {
@@ -635,16 +643,8 @@ app.get("/api/news", async (req, res) => {
 
 app.get("/api/news/:slug", async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("ai_news")
-      .select("*")
-      .eq("slug", req.params.slug)
-      .single();
-    
-    if (error || !data) {
-      return res.status(404).json({ error: "Article not found" });
-    }
-    
+    const { data, error } = await supabase.from("ai_news").select("*").eq("slug", req.params.slug).single();
+    if (error || !data) return res.status(404).json({ error: "Article not found" });
     res.json(data);
   } catch (error) {
     console.error("API error:", error);
@@ -656,19 +656,19 @@ app.get("/api/search", async (req, res) => {
   try {
     const q = req.query.q || "";
     if (!q.trim()) return res.json({ data: [] });
-    
+
     const { data, error } = await supabase
       .from("ai_news")
       .select("id,title,slug,short_desc,image_url,region,genre,published_at")
       .or(`title.ilike.%${q}%,ai_content.ilike.%${q}%,short_desc.ilike.%${q}%`)
       .order("created_at", { ascending: false })
       .limit(30);
-    
+
     if (error) {
       console.error("Database error:", error);
       return res.status(500).json({ error: "Database error", message: error.message });
     }
-    
+
     res.json({ data: data || [] });
   } catch (error) {
     console.error("API error:", error);
@@ -676,21 +676,21 @@ app.get("/api/search", async (req, res) => {
   }
 });
 
-// -------------------- HEALTH CHECK --------------------
+/* -------------------- HEALTH & ROOT -------------------- */
 app.get("/health", (req, res) => {
   const health = {
     status: "healthy",
     timestamp: new Date().toISOString(),
     service: "AI News Aggregator",
     deployment: "Render",
-    url: "https://rt-india.onrender.com",
-    providers: providers.map(p => p.name),
+    url: process.env.PUBLIC_URL || "https://rt-india.onrender.com",
+    providers: providers.map((p) => p.name),
     queue: {
       running,
       pending: queue.length,
       maxConcurrent: MAX_CONCURRENT
     },
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || "development"
   };
   res.status(200).json(health);
 });
@@ -711,60 +711,53 @@ app.get("/", (req, res) => {
   });
 });
 
-// -------------------- ERROR HANDLING --------------------
+/* -------------------- ERROR HANDLING -------------------- */
 app.use((err, req, res, next) => {
   console.error("Server error:", err);
-  
-  // Handle CORS errors
-  if (err.message === 'Not allowed by CORS') {
-    return res.status(403).json({ 
-      error: 'CORS Error', 
-      message: 'Origin not allowed',
-      allowedOrigins: [
-        'https://rt-india.onrender.com',
-        'http://localhost:3000',
-        'http://localhost:5173'
-      ]
+  if (err && err.message && err.message.includes("CORS")) {
+    return res.status(403).json({
+      error: "CORS Error",
+      message: err.message,
+      allowedOrigins,
+      allowAll,
+      allowCredentials
     });
   }
-  
-  res.status(500).json({ 
-    error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : err.message,
+  res.status(500).json({
+    error: "Internal Server Error",
+    message: process.env.NODE_ENV === "production" ? "Something went wrong" : err.message,
     timestamp: new Date().toISOString()
   });
 });
 
-// Handle 404
 app.use((req, res) => {
-  res.status(404).json({ 
-    error: 'Route not found',
+  res.status(404).json({
+    error: "Route not found",
     path: req.path,
     method: req.method,
     timestamp: new Date().toISOString()
   });
 });
 
-// -------------------- START SERVER --------------------
+/* -------------------- START & GRACEFUL SHUTDOWN -------------------- */
 const PORT = process.env.PORT || 10000;
 
-// Graceful shutdown for Render
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
+process.on("SIGTERM", () => {
+  console.log("SIGTERM signal received: closing HTTP server");
   process.exit(0);
 });
-
-process.on('SIGINT', () => {
-  console.log('SIGINT signal received: closing HTTP server');
+process.on("SIGINT", () => {
+  console.log("SIGINT signal received: closing HTTP server");
   process.exit(0);
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ AI News Backend Running on Render`);
-  console.log(`📍 URL: https://rt-india.onrender.com`);
+  console.log("✅ AI News Backend Running on Render");
+  console.log(`📍 URL: ${process.env.PUBLIC_URL || "https://rt-india.onrender.com"}`);
   console.log(`🚪 Port: ${PORT}`);
-  console.log(`🌍 CORS: Enabled for all origins in production`);
+  console.log(`🌍 CORS: allowAll=${allowAll} | allowCredentials=${allowCredentials}`);
+  console.log(`🔒 Allowed origins: ${allowAll ? "ALL" : allowedOrigins.join(", ")}`);
   console.log(`⏰ Poll Interval: ${POLL_MINUTES} minutes`);
   console.log(`🧹 Cleanup Interval: ${CLEANUP_HOURS} hours`);
-  console.log(`🤖 Available AI Providers: ${providers.map(p => p.name).join(', ')}`);
+  console.log(`🤖 Providers: ${providers.map((p) => p.name).join(", ")}`);
 });
