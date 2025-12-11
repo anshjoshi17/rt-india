@@ -85,6 +85,10 @@ const parser = new RSSParser({
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 /* -------------------- NEWS SOURCES (LATEST, HINDI FOCUS) -------------------- */
+/*
+  Priority order: Uttarakhand (hi) -> India (hi) -> International (en, rewritten to Hindi)
+  We still rewrite all items via AI to ensure Hindi content.
+*/
 const NEWS_SOURCES = {
   UTTARAKHAND_NEWS18: {
     priority: 1,
@@ -289,7 +293,7 @@ const REGION_KEYWORDS = {
 
 /* -------------------- ENHANCED NEWS API FUNCTIONS FOR LATEST NEWS -------------------- */
 
-// 1. NEWSAPI.org Integration with LATEST news
+// 1. NEWSAPI.org Integration with LATEST news (can request Hindi when available)
 async function fetchFromNewsAPI(params) {
   try {
     const { q, language, pageSize, sortBy, from } = params;
@@ -350,7 +354,7 @@ async function fetchFromNewsAPI(params) {
   }
 }
 
-// 2. GNews.io Integration with LATEST news
+// 2. GNews.io Integration with LATEST news (supports lang/country)
 async function fetchFromGNewsAPI(params) {
   try {
     const { q, lang, country, max, sortby } = params;
@@ -527,6 +531,7 @@ function normalizeArticle(apiArticle, sourceConfig) {
 }
 
 /* -------------------- CONTENT ENHANCEMENT FUNCTIONS -------------------- */
+/* Fetch article body, images, videos — same as before */
 async function fetchArticleBody(url) {
   try {
     const res = await fetch(url, {
@@ -670,32 +675,52 @@ async function extractVideosFromArticle(url) {
 }
 
 /* -------------------- AI RESPONSE CLEANUP & PARSING -------------------- */
+
+/**
+ * sanitizeAIText(text)
+ * - Remove invisible/control characters
+ * - Remove embedded HTML tags (basic)
+ * - Remove JSON/JS objects embedded inline (like {"_id":...})
+ * - Collapse repeated whitespace
+ */
 function sanitizeAIText(text) {
   if (!text) return "";
   let t = String(text);
 
+  // 1) Normalize line endings, remove nulls, control chars
   t = t.replace(/\u0000/g, '');
   t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
+  // 2) Remove large JSON-like blobs (heuristic)
   t = t.replace(/\{(?:[^{}]|"(?:\\.|[^"\\])*")*\}/g, (m) => {
     if (/\b(_id|slug|type|status|category|title_hn|_source|_rev|_meta)\b/i.test(m)) return '\n';
     if (m.length > 120) return '\n';
     return '';
   });
 
+  // 3) Strip any HTML tags leftover
   t = t.replace(/<script[\s\S]*?<\/script>/gi, '')
        .replace(/<style[\s\S]*?<\/style>/gi, '')
        .replace(/<\/?[^>]+(>|$)/g, '');
 
+  // 4) Remove repeated boilerplate lines (Hindi/English heuristics)
   t = t.replace(/(यह समाचार (आजकल|वर्तमान में) (चर्चा में|प्रचलित) (है|रहा है)[\s\S]*?)(\n|$)/gi, '\n');
   t = t.replace(/\b(This news|This article|According to sources)[\s\S]*?(\n|$)/gi, '\n');
 
+  // 5) Replace multiple blank lines with two
   t = t.replace(/\n{3,}/g, '\n\n');
+
+  // 6) Trim whitespace
   t = t.trim();
 
   return t;
 }
 
+/**
+ * extractJSONIfAny(text)
+ * - Try to find a JSON object in text and parse it (first {} that is valid JSON)
+ * - Return parsed object or null
+ */
 function extractJSONIfAny(text) {
   if (!text) return null;
   const RE = /\{(?:[^{}]|"(?:\\.|[^"\\])*")*\}/g;
@@ -714,6 +739,12 @@ function extractJSONIfAny(text) {
   return null;
 }
 
+/**
+ * cleanupBoilerplate(text, titleCandidate)
+ * - remove repeated title if duplicated at the start of the content
+ * - remove leading "Title: ..." labels
+ * - remove stray metadata lines like "slug: ..." or "category: ...".
+ */
 function cleanupBoilerplate(text, titleCandidate = '') {
   let t = text || '';
   t = t.replace(/^(Title|शीर्षक|Title:|Title -|Title—|शीर्षक:)\s*/i, '');
@@ -733,11 +764,21 @@ function cleanupBoilerplate(text, titleCandidate = '') {
   return t;
 }
 
+/**
+ * enforceHindiOnly(text)
+ * - optional: keep only Devanagari + punctuation + numerals (useful if you want strict Hindi)
+ * - Use carefully: it will remove English names/places; disable if not desired.
+ */
 function enforceHindiOnly(text) {
   if (!text) return text;
-  return text.replace(/[^ \n\u0900-\u097F0-9.,।—\-–:;()"?'?\/%&]/g, '');
+  return text.replace(/[^ \n\u0900-\u097F0-9.,।—\-–:;()“”"'?\/%&]/g, '');
 }
 
+/**
+ * parseAIResponse(aiOutput)
+ * - main shared parser used by rewriteWithParallelAI caller
+ * - returns { title: string, content: string }
+ */
 function parseAIResponse(aiOutput) {
   let raw = aiOutput || '';
   if (typeof raw !== 'string') raw = String(raw);
@@ -765,6 +806,7 @@ function parseAIResponse(aiOutput) {
 
     content = sanitizeAIText(content);
     content = cleanupBoilerplate(content, title);
+    // optional: content = enforceHindiOnly(content);
 
     return {
       title: (title || '').substring(0, 240).trim(),
@@ -810,6 +852,7 @@ function parseAIResponse(aiOutput) {
 
   content = cleanupBoilerplate(content, title);
   content = content.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  // optional: content = enforceHindiOnly(content);
 
   return {
     title: title || '',
@@ -817,11 +860,13 @@ function parseAIResponse(aiOutput) {
   };
 }
 
+/* Helper to escape RegExp special chars when removing title from content */
 function escapeRegExp(string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/* -------------------- PARALLEL AI PROVIDERS -------------------- */
+/* -------------------- PARALLEL AI PROVIDERS (rewrite to HINDI) -------------------- */
+/* Replacement: rewriteWithOpenRouter (returns raw model text) */
 async function rewriteWithOpenRouter(title, content) {
   if (!process.env.OPENROUTER_API_KEY) {
     throw new Error("OpenRouter API key not configured");
@@ -897,6 +942,7 @@ If you cannot produce JSON, return ONLY plain Hindi text for the article content
   }
 }
 
+/* Replacement: rewriteWithGroq (returns raw model text) */
 async function rewriteWithGroq(title, content) {
   if (!process.env.GROQ_API_KEY) {
     throw new Error("Groq API key not configured");
@@ -1149,7 +1195,7 @@ async function fetchRegionFirst(regionKey, maxItems = 20) {
 
   const regionItems = [];
 
-  // 1) Prefer obvious RSS sources for Uttarakhand
+  // 1) Prefer obvious RSS sources for Uttarakhand (if present in NEWS_SOURCES)
   for (const [key, cfg] of Object.entries(NEWS_SOURCES)) {
     try {
       if (cfg.type === "RSS" && (cfg.name || "").toLowerCase().includes("uttarakhand")) {
@@ -1261,7 +1307,7 @@ async function processNewsItem(item, sourceType = "api") {
       articleContent = item.title + ". " + (item.description || "");
     }
 
-    // Rewrite to Hindi
+    // Rewrite to Hindi (providers enforce Hindi in prompts)
     const aiResult = await rewriteWithParallelAI(item.title, articleContent, videos.length > 0);
 
     if (!aiResult.success) {
@@ -1323,8 +1369,8 @@ async function processNewsItem(item, sourceType = "api") {
   }
 }
 
-/* -------------------- MAIN PROCESSING FUNCTION -------------------- */
-const PROCESS_COUNT = Number(process.env.ITEMS_TO_PROCESS) || 18;
+/* -------------------- MAIN PROCESSING FUNCTION (LATEST HINDI FOCUS) -------------------- */
+const PROCESS_COUNT = Number(process.env.ITEMS_TO_PROCESS) || 18; // increased from 12 → 18 (configurable)
 
 async function processAllNews() {
   console.log("\n" + "=".repeat(60));
@@ -1363,7 +1409,7 @@ async function processAllNews() {
     sourceStats['Uttarakhand (region)'] = 0;
   }
 
-  // ---- THEN PROCESS REMAINING SOURCES BY PRIORITY ----
+  // ---- THEN PROCESS REMAINING SOURCES BY PRIORITY (skip explicit uttarakhand RSS sources already included) ----
   for (const source of sourcesByPriority) {
     if ((source.name || "").toLowerCase().includes("uttarakhand")) {
       console.log(`   ⏭️ Skipping (already covered by region-first): ${source.name}`);
@@ -1447,7 +1493,7 @@ async function processAllNews() {
     return dateB - dateA;
   });
 
-  // Process only the newest PROCESS_COUNT
+  // Process only the newest PROCESS_COUNT (default 18)
   const itemsToProcess = sortedItems.slice(0, PROCESS_COUNT);
 
   console.log(`🔄 Processing ${itemsToProcess.length} NEWEST articles (sorted by date)...\n`);
@@ -1494,9 +1540,9 @@ async function runScheduledProcessing() {
   try {
     await processAllNews();
 
-    // Cleanup old articles (keep 2 days)
+    // Cleanup old articles (keep 2 days for latest Hindi news focus)
     try {
-      const cutoff = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+      const cutoff = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(); // 2 days
       const { error, count } = await supabase
         .from("ai_news")
         .delete()
@@ -1521,17 +1567,409 @@ async function runScheduledProcessing() {
 // Initial run after 5 seconds
 setTimeout(runScheduledProcessing, 5000);
 
-// Run frequently for latest news
+// Run frequently for latest news (every 15 minutes by default)
 const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 5;
 setInterval(runScheduledProcessing, POLL_MINUTES * 60 * 1000);
 
-/* -------------------- Export for API routes -------------------- */
-module.exports = {
-  app,
-  supabase,
-  isProcessing,
-  runScheduledProcessing,
-  NEWS_SOURCES,
-  POLL_MINUTES,
-  PROCESS_COUNT
-};
+/* -------------------- API Routes -------------------- */
+app.get("/api/news", async (req, res) => {
+  try {
+    const { limit = 30, genre, region, page = 1 } = req.query;
+    const pageSize = Math.min(Number(limit), 100);
+    const pageNum = Math.max(Number(page), 1);
+    const offset = (pageNum - 1) * pageSize;
+
+    let query = supabase
+      .from("ai_news")
+      .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta", { count: "exact" })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + pageSize - 1);
+
+    if (genre && genre !== "All") query = query.eq("genre", genre);
+
+    // region param: allow case-insensitive substring matching for robustness
+    if (region && region !== "All") {
+      const regionParam = String(region || "").trim();
+      // Use ILIKE so 'india', 'India', 'भारत', 'उत्तराखंड' etc can match
+      query = query.ilike("region", `%${regionParam}%`);
+    }
+
+    const { data, error, count } = await query;
+
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({ error: "Database error", details: error.message });
+    }
+
+    res.json({
+      success: true,
+      data: data || [],
+      pagination: {
+        page: pageNum,
+        limit: pageSize,
+        total: count || 0,
+        totalPages: count ? Math.ceil(count / pageSize) : 0
+      }
+    });
+  } catch (error) {
+    console.error("API error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Server error",
+      message: error.message
+    });
+  }
+});
+
+app.get("/api/news/:slug", async (req, res) => {
+  try {
+    const { data: article, error } = await supabase
+      .from("ai_news")
+      .select("*")
+      .eq("slug", req.params.slug)
+      .single();
+
+    if (error || !article) {
+      return res.status(404).json({
+        success: false,
+        error: "Article not found"
+      });
+    }
+
+    res.json(article);
+
+  } catch (error) {
+    console.error("API error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Server error",
+      message: error.message
+    });
+  }
+});
+
+/* ---------------------------
+   Robust region endpoint
+   - case-insensitive handling
+   - capitalized attempt
+   - ilike fallback (substring), ordered by published_at
+   --------------------------- */
+app.get("/api/region/:region", async (req, res) => {
+  try {
+    const rawRegion = (req.params.region || "").toString().trim();
+    const regionLower = rawRegion.toLowerCase();
+    const limit = Math.min(Number(req.query.limit) || 12, 100);
+
+    if (!rawRegion) {
+      return res.status(400).json({ success: false, error: "Region required" });
+    }
+
+    console.log(`[region API] requested region: "${rawRegion}" -> normalized: "${regionLower}", limit: ${limit}`);
+
+    // 1) Try exact match on normalized lower-case value (common case)
+    // NOTE: If your DB stores region values in lower-case, this will match directly.
+    let { data, error } = await supabase
+      .from("ai_news")
+      .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta")
+      .eq("region", regionLower)
+      .order("published_at", { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error("[region API] supabase error (exact):", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    // 2) If empty, try capitalized exact match and ILIKE substring fallback
+    if ((!data || data.length === 0)) {
+      const capitalized = rawRegion.charAt(0).toUpperCase() + rawRegion.slice(1).toLowerCase();
+
+      // Try capitalized exact match
+      const { data: dataCap, error: errCap } = await supabase
+        .from("ai_news")
+        .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta")
+        .eq("region", capitalized)
+        .order("published_at", { ascending: false })
+        .limit(limit);
+
+      if (errCap) {
+        console.warn("[region API] supabase error (capitalized):", errCap);
+      }
+
+      if (dataCap && dataCap.length > 0) {
+        console.log(`[region API] matched capitalized region "${capitalized}" -> ${dataCap.length} items`);
+        return res.json({ success: true, data: dataCap });
+      }
+
+      // Fallback: case-insensitive substring match using ILIKE
+      const { data: dataIlike, error: errIlike } = await supabase
+        .from("ai_news")
+        .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta")
+        .ilike("region", `%${regionLower}%`)
+        .order("published_at", { ascending: false })
+        .limit(limit);
+
+      if (errIlike) {
+        console.error("[region API] supabase error (ilike):", errIlike);
+        return res.status(500).json({ success: false, error: errIlike.message });
+      }
+
+      if (dataIlike && dataIlike.length > 0) {
+        console.log(`[region API] ilike matched ${dataIlike.length} items (region contains "${regionLower}")`);
+        return res.json({ success: true, data: dataIlike });
+      }
+
+      // Last-resort: return empty array (front-end will show fallback message)
+      console.log(`[region API] no items found for region "${rawRegion}" (exact/capitalized/ilike tried)`);
+      return res.json({ success: true, data: [] });
+    }
+
+    // If exact-match returned results
+    console.log(`[region API] exact-match returned ${data.length} items for "${regionLower}"`);
+    return res.json({ success: true, data });
+
+  } catch (err) {
+    console.error("[region API] unexpected error:", err && (err.message || err));
+    res.status(500).json({ success: false, error: (err && err.message) || "Server error" });
+  }
+});
+
+app.get("/api/search", async (req, res) => {
+  try {
+    const q = req.query.q || "";
+    if (!q.trim()) return res.json({ success: true, data: [] });
+
+    const { data, error } = await supabase
+      .from("ai_news")
+      .select("id,title,slug,short_desc,image_url,region,genre,published_at")
+      .or(`title.ilike.%${q}%,ai_content.ilike.%${q}%,short_desc.ilike.%${q}%`)
+      .order("created_at", { ascending: false })
+      .limit(30);
+
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Database error",
+        details: error.message
+      });
+    }
+
+    res.json({ success: true, data: data || [] });
+  } catch (error) {
+    console.error("API error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Server error",
+      message: error.message
+    });
+  }
+});
+
+app.get("/api/run-now", async (req, res) => {
+  try {
+    if (isProcessing) {
+      return res.json({
+        success: false,
+        message: "Processing already in progress"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Latest Hindi news processing started"
+    });
+
+    runScheduledProcessing();
+
+  } catch (error) {
+    console.error("Manual run error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.get("/api/stats", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("ai_news")
+      .select("genre, region, created_at, meta")
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    const stats = {
+      total: data?.length || 0,
+      byGenre: {},
+      byRegion: {},
+      byApiSource: {},
+      latestArticle: null,
+      wordStats: {
+        totalWords: 0,
+        averageWords: 0
+      }
+    };
+
+    let latestDate = new Date(0);
+
+    data?.forEach(item => {
+      stats.byGenre[item.genre] = (stats.byGenre[item.genre] || 0) + 1;
+      stats.byRegion[item.region] = (stats.byRegion[item.region] || 0) + 1;
+
+      const apiSource = item.meta?.api_source || item.meta?.api || "unknown";
+      stats.byApiSource[apiSource] = (stats.byApiSource[apiSource] || 0) + 1;
+
+      const wordCount = item.meta?.word_count || 0;
+      stats.wordStats.totalWords += wordCount;
+
+      const itemDate = new Date(item.created_at);
+      if (itemDate > latestDate) {
+        latestDate = itemDate;
+        stats.latestArticle = {
+          time: item.created_at,
+          age: Math.floor((Date.now() - itemDate.getTime()) / (1000 * 60)) + " minutes ago"
+        };
+      }
+    });
+
+    if (data?.length > 0) {
+      stats.wordStats.averageWords = Math.round(stats.wordStats.totalWords / data.length);
+    }
+
+    res.json({ success: true, stats });
+  } catch (error) {
+    console.error("Stats error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Server error",
+      message: error.message
+    });
+  }
+});
+
+app.get("/health", (req, res) => {
+  const providers = [];
+  if (process.env.OPENROUTER_API_KEY) providers.push("OpenRouter");
+  if (process.env.GROQ_API_KEY) providers.push("Groq");
+
+  const apiSources = [];
+  if (process.env.NEWSAPI_KEY) apiSources.push("NewsAPI");
+  if (process.env.GNEWS_API_KEY) apiSources.push("GNews");
+
+  res.json({
+    success: true,
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    service: "Hindi News AI Rewriter - LATEST HINDI NEWS FOCUS",
+    version: "7.0",
+    features: ["Latest Hindi News Only", "300+ Word Articles", "Video Extraction", "Real-time Updates"],
+    ai_providers: providers.length > 0 ? providers : ["Fallback"],
+    news_apis: apiSources.length > 0 ? apiSources : ["RSS Fallback Only"],
+    config: {
+      poll_interval: `${POLL_MINUTES} minutes`,
+      focus: "Latest news (last 24 hours) -> rewritten to Hindi",
+      cleanup: "2 days retention",
+      items_to_process: PROCESS_COUNT
+    }
+  });
+});
+
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Hindi News Rewriter API - LATEST HINDI NEWS FOCUS",
+    version: "7.0",
+    description: "Fetching and rewriting latest live news into Hindi, storing in Supabase, keeping only last 2 days",
+    features: [
+      "LATEST NEWS (last 24 hours focus) → rewritten to HINDI",
+      "300+ word Hindi articles",
+      "Twitter/YouTube video extraction",
+      "Real-time news fetching",
+      "Priority: Uttarakhand → National → International",
+      "Frequent updates (every 15 minutes)",
+      "Automatic cleanup (2 days retention)"
+    ],
+    endpoints: {
+      news: "/api/news (shows newest first)",
+      article: "/api/news/:slug",
+      search: "/api/search",
+      stats: "/api/stats",
+      region: "/api/region/:region",
+      health: "/health",
+      manual_run: "/api/run-now"
+    }
+  });
+});
+
+/* -------------------- Error Handling -------------------- */
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Not found",
+    path: req.path,
+    method: req.method
+  });
+});
+
+app.use((err, req, res, next) => {
+  console.error("Server error:", err);
+  res.status(500).json({
+    success: false,
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "production" ? "Something went wrong" : err.message
+  });
+});
+
+/* -------------------- Start Server -------------------- */
+const PORT = process.env.PORT || 10000;
+
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully");
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  console.log("SIGINT received, shutting down gracefully");
+  process.exit(0);
+});
+
+app.listen(PORT, () => {
+  console.log(`
+  🚀 SERVER STARTED SUCCESSFULLY!
+  ============================================
+  Port: ${PORT}
+  URL: https://rt-india.onrender.com
+
+  🔥 LATEST HINDI NEWS CONFIGURATION:
+  - Max concurrent tasks: ${MAX_CONCURRENT_TASKS}
+  - Poll interval: ${POLL_MINUTES} minutes
+  - Focus: LATEST NEWS (last 24 hours) -> rewritten to HINDI
+  - Priority: Uttarakhand → National → International
+  - Retention: 2 days cleanup
+  - Features: 300+ words, video extraction
+  - Items processed per cycle: ${PROCESS_COUNT}
+
+  📰 NEWS SOURCES (LATEST FIRST):
+  1. News18 Uttarakhand (RSS - Latest)
+  2. Amar Ujala Uttarakhand (RSS - Latest)
+  3. AajTak India (RSS - Hindi)
+  4. GNews India (Hindi)
+  5. International (GNews & NewsAPI, rewritten to Hindi)
+
+  ⚡ SYSTEM FEATURES:
+  - Region-first (Uttarakhand) fetching + region fallback queries
+  - Always fetches NEWEST articles first
+  - Date sorting on all sources
+  - Time-limited queries (last 24 hours)
+  - Frequent updates every ${POLL_MINUTES} minutes
+  - Real-time news processing
+  - Cleanup of content older than 2 days
+
+  🚀 Ready to deliver LATEST Hindi news!
+  `);
+});
