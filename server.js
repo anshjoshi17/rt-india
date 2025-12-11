@@ -5,7 +5,6 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");
 const RSSParser = require("rss-parser");
 const slugify = require("slugify");
 const cheerio = require("cheerio");
