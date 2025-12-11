@@ -1568,7 +1568,7 @@ async function runScheduledProcessing() {
 setTimeout(runScheduledProcessing, 5000);
 
 // Run frequently for latest news (every 15 minutes by default)
-const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 15;
+const POLL_MINUTES = Number(process.env.POLL_MINUTES) || 5;
 setInterval(runScheduledProcessing, POLL_MINUTES * 60 * 1000);
 
 /* -------------------- API Routes -------------------- */
