@@ -280,6 +280,17 @@ function detectGenreKeyword(text) {
   return "Other";
 }
 
+/* -------------------- REGION KEYWORDS -------------------- */
+const REGION_KEYWORDS = {
+  uttarakhand: [
+    "uttarakhand", "उत्तराखंड", "dehradun", "देहरादून",
+    "nainital", "नैनीताल", "almora", "अल्मोड़ा",
+    "pithoragarh", "पिथौरागढ़", "rudraprayag", "रुद्रप्रयाग",
+    "chamoli", "चमोली", "pauri", "पौड़ी", "champawat", "चम्पावत",
+    "haridwar", "हरिद्वार", "rishikesh", "ऋषिकेश"
+  ]
+};
+
 /* -------------------- ENHANCED NEWS API FUNCTIONS FOR LATEST NEWS -------------------- */
 
 // 1. NEWSAPI.org Integration with LATEST news (can request Hindi when available)
@@ -973,6 +984,73 @@ async function fetchArticleImage(url) {
   }
 }
 
+/* -------------------- Fetch Region-First Items (Uttarakhand) -------------------- */
+async function fetchRegionFirst(regionKey, maxItems = 20) {
+  const keywords = REGION_KEYWORDS[regionKey] || [regionKey];
+  const q = keywords.join(" OR ");
+
+  const regionItems = [];
+
+  // 1) Prefer obvious RSS sources for Uttarakhand (if present in NEWS_SOURCES)
+  for (const [key, cfg] of Object.entries(NEWS_SOURCES)) {
+    try {
+      if (cfg.type === "RSS" && (cfg.name || "").toLowerCase().includes("uttarakhand")) {
+        const items = await fetchRSSFeed(cfg.config.url, cfg.config.maxItems || maxItems);
+        const normalized = items.map(it => {
+          const n = normalizeArticle(it, { type: "RSS", name: cfg.name });
+          n.meta = { ...(n.meta || {}), region_priority: true, sourceName: cfg.name };
+          return n;
+        });
+        regionItems.push(...normalized);
+      }
+    } catch (e) {
+      console.warn(`Region RSS fetch failed (${cfg.name}):`, e.message);
+    }
+  }
+
+  // 2) Try GNews focused query for region (Hindi)
+  try {
+    const gnewsItems = await fetchFromGNewsAPI({ q, lang: "hi", country: "in", max: maxItems, sortby: "publishedAt" });
+    const normalized = gnewsItems.map(it => {
+      const n = normalizeArticle(it, { type: "GNEWS", name: "GNews (region)" });
+      n.meta = { ...(n.meta || {}), region_priority: true, sourceName: n.source || "GNews (region)" };
+      return n;
+    });
+    regionItems.push(...normalized);
+  } catch (e) {
+    console.warn("Region GNews fetch failed:", e.message);
+  }
+
+  // 3) Try NewsAPI for region keywords (fallback)
+  try {
+    const newsapiItems = await fetchFromNewsAPI({ q, language: "hi", pageSize: maxItems, sortBy: "publishedAt" });
+    const normalized = newsapiItems.map(it => {
+      const n = normalizeArticle(it, { type: "NEWSAPI", name: "NewsAPI (region)" });
+      n.meta = { ...(n.meta || {}), region_priority: true, sourceName: n.source || "NewsAPI (region)" };
+      return n;
+    });
+    regionItems.push(...normalized);
+  } catch (e) {
+    console.warn("Region NewsAPI fetch failed:", e.message);
+  }
+
+  // Sort by date and dedupe by URL
+  const unique = [];
+  const seen = new Set();
+  regionItems
+    .sort((a, b) => new Date(b.pubDate || b.publishedAt || 0) - new Date(a.pubDate || a.publishedAt || 0))
+    .slice(0, maxItems)
+    .forEach(it => {
+      if (it.url && !seen.has(it.url)) {
+        seen.add(it.url);
+        unique.push(it);
+      }
+    });
+
+  console.log(`   ✅ Region-first fetched ${unique.length} items for ${regionKey}`);
+  return unique;
+}
+
 /* -------------------- Process Single News Item -------------------- */
 async function processNewsItem(item, sourceType = "api") {
   try {
@@ -1036,8 +1114,22 @@ async function processNewsItem(item, sourceType = "api") {
     const slug = makeSlug(aiResult.title);
     const fullText = aiResult.title + " " + aiResult.content;
     const genre = detectGenreKeyword(fullText);
-    const sourceHost = item.url ? new URL(item.url).hostname : "";
+    const sourceHost = item.url ? (() => { try { return new URL(item.url).hostname } catch(e){ return "" } })() : "";
     const region = detectRegionFromText(fullText, sourceHost);
+
+    const recordMeta = {
+      original_title: item.title,
+      source: item.source || sourceType,
+      ai_provider: aiResult.provider,
+      word_count: aiResult.wordCount,
+      image_source: articleImage ? 'scraped' : 'default',
+      api_source: item.meta?.api || item.meta?.api_source || "unknown",
+      source_name: item.meta?.sourceName || item.source || "unknown",
+      has_videos: videos.length > 0,
+      videos: videos.length > 0 ? videos : null,
+      is_latest: true,
+      region_priority: !!item.meta?.region_priority
+    };
 
     const record = {
       title: aiResult.title,
@@ -1049,18 +1141,7 @@ async function processNewsItem(item, sourceType = "api") {
       published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
       region: region,
       genre: genre,
-      meta: {
-        original_title: item.title,
-        source: item.source || sourceType,
-        ai_provider: aiResult.provider,
-        word_count: aiResult.wordCount,
-        image_source: articleImage ? 'scraped' : 'default',
-        api_source: item.meta?.api || "unknown",
-        source_name: item.meta?.sourceName || item.source || "unknown",
-        has_videos: videos.length > 0,
-        videos: videos.length > 0 ? videos : null,
-        is_latest: true
-      }
+      meta: recordMeta
     };
 
     const { error } = await supabase.from("ai_news").insert(record);
@@ -1085,6 +1166,8 @@ async function processNewsItem(item, sourceType = "api") {
 }
 
 /* -------------------- MAIN PROCESSING FUNCTION (LATEST HINDI FOCUS) -------------------- */
+const PROCESS_COUNT = Number(process.env.ITEMS_TO_PROCESS) || 18; // increased from 12 → 18 (configurable)
+
 async function processAllNews() {
   console.log("\n" + "=".repeat(60));
   console.log("🚀 STARTING LATEST HINDI NEWS PROCESSING CYCLE");
@@ -1103,7 +1186,35 @@ async function processAllNews() {
 
   let newestArticleTime = new Date(0);
 
+  // ---- REGION-FIRST: UTTARAKHAND ----
+  try {
+    console.log("🔎 Fetching region-priority (uttarakhand) items first...");
+    const regionItems = await fetchRegionFirst("uttarakhand", 20);
+    if (regionItems.length > 0) {
+      allItems.push(...regionItems.map(it => {
+        // ensure meta marks region-priority (so logs / decisions can use it later)
+        it.meta = { ...(it.meta || {}), region_priority: true, sourceName: it.meta?.sourceName || it.source || "region" };
+        return it;
+      }));
+      sourceStats['Uttarakhand (region)'] = regionItems.length;
+    } else {
+      sourceStats['Uttarakhand (region)'] = 0;
+    }
+    // small pause to reduce rate-limit risk
+    await sleep(500);
+  } catch (e) {
+    console.warn("   ❌ Region-first fetch failed:", e.message);
+    sourceStats['Uttarakhand (region)'] = 0;
+  }
+
+  // ---- THEN PROCESS REMAINING SOURCES BY PRIORITY (skip explicit uttarakhand RSS sources already included) ----
   for (const source of sourcesByPriority) {
+    // skip if this source is a known Uttarakhand RSS we already fetched in region-first
+    if ((source.name || "").toLowerCase().includes("uttarakhand")) {
+      console.log(`   ⏭️ Skipping (already covered by region-first): ${source.name}`);
+      continue;
+    }
+
     try {
       console.log(`🔍 [Priority ${source.priority}] Fetching LATEST ${source.name}...`);
 
@@ -1181,8 +1292,8 @@ async function processAllNews() {
     return dateB - dateA;
   });
 
-  // Process only the newest 12
-  const itemsToProcess = sortedItems.slice(0, 12);
+  // Process only the newest PROCESS_COUNT (default 18)
+  const itemsToProcess = sortedItems.slice(0, PROCESS_COUNT);
 
   console.log(`🔄 Processing ${itemsToProcess.length} NEWEST articles (sorted by date)...\n`);
 
@@ -1330,6 +1441,38 @@ app.get("/api/news/:slug", async (req, res) => {
   }
 });
 
+app.get("/api/region/:region", async (req, res) => {
+  try {
+    const regionParam = (req.params.region || "").toLowerCase();
+    const limit = Math.min(Number(req.query.limit) || 12, 100);
+
+    if (!regionParam) {
+      return res.status(400).json({ success: false, error: "Region required" });
+    }
+
+    const { data, error } = await supabase
+      .from("ai_news")
+      .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta")
+      .eq("region", regionParam)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    res.json({ success: true, data: data || [] });
+  } catch (error) {
+    console.error("API error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Server error",
+      message: error.message
+    });
+  }
+});
+
 app.get("/api/search", async (req, res) => {
   try {
     const q = req.query.q || "";
@@ -1417,7 +1560,7 @@ app.get("/api/stats", async (req, res) => {
       stats.byGenre[item.genre] = (stats.byGenre[item.genre] || 0) + 1;
       stats.byRegion[item.region] = (stats.byRegion[item.region] || 0) + 1;
 
-      const apiSource = item.meta?.api_source || "unknown";
+      const apiSource = item.meta?.api_source || item.meta?.api || "unknown";
       stats.byApiSource[apiSource] = (stats.byApiSource[apiSource] || 0) + 1;
 
       const wordCount = item.meta?.word_count || 0;
@@ -1469,7 +1612,8 @@ app.get("/health", (req, res) => {
     config: {
       poll_interval: `${POLL_MINUTES} minutes`,
       focus: "Latest news (last 24 hours) -> rewritten to Hindi",
-      cleanup: "2 days retention"
+      cleanup: "2 days retention",
+      items_to_process: PROCESS_COUNT
     }
   });
 });
@@ -1494,7 +1638,7 @@ app.get("/", (req, res) => {
       article: "/api/news/:slug",
       search: "/api/search",
       stats: "/api/stats",
-      sources: "/api/sources",
+      region: "/api/region/:region",
       health: "/health",
       manual_run: "/api/run-now"
     }
@@ -1547,6 +1691,7 @@ app.listen(PORT, () => {
   - Priority: Uttarakhand → National → International
   - Retention: 2 days cleanup
   - Features: 300+ words, video extraction
+  - Items processed per cycle: ${PROCESS_COUNT}
 
   📰 NEWS SOURCES (LATEST FIRST):
   1. News18 Uttarakhand (RSS - Latest)
@@ -1556,6 +1701,7 @@ app.listen(PORT, () => {
   5. International (GNews & NewsAPI, rewritten to Hindi)
 
   ⚡ SYSTEM FEATURES:
+  - Region-first (Uttarakhand) fetching + region fallback queries
   - Always fetches NEWEST articles first
   - Date sorting on all sources
   - Time-limited queries (last 24 hours)
