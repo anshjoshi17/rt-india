@@ -674,112 +674,345 @@ async function extractVideosFromArticle(url) {
   }
 }
 
-/* -------------------- PARALLEL AI PROVIDERS (rewrite to HINDI) -------------------- */
-// Providers already use Hindi prompts; no change required to enforce Hindi output.
-// rewriteWithOpenRouter / rewriteWithGroq / fallback kept as before.
+/* -------------------- AI RESPONSE CLEANUP & PARSING -------------------- */
 
+/**
+ * sanitizeAIText(text)
+ * - Remove invisible/control characters
+ * - Remove embedded HTML tags (basic)
+ * - Remove JSON/JS objects embedded inline (like {"_id":...})
+ * - Collapse repeated whitespace
+ */
+function sanitizeAIText(text) {
+  if (!text) return "";
+  let t = String(text);
+
+  // 1) Normalize line endings, remove nulls, control chars
+  t = t.replace(/\u0000/g, '');
+  t = t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // 2) Remove large JSON-like blobs (heuristic)
+  t = t.replace(/\{(?:[^{}]|"(?:\\.|[^"\\])*")*\}/g, (m) => {
+    if (/\b(_id|slug|type|status|category|title_hn|_source|_rev|_meta)\b/i.test(m)) return '\n';
+    if (m.length > 120) return '\n';
+    return '';
+  });
+
+  // 3) Strip any HTML tags leftover
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, '')
+       .replace(/<style[\s\S]*?<\/style>/gi, '')
+       .replace(/<\/?[^>]+(>|$)/g, '');
+
+  // 4) Remove repeated boilerplate lines (Hindi/English heuristics)
+  t = t.replace(/(यह समाचार (आजकल|वर्तमान में) (चर्चा में|प्रचलित) (है|रहा है)[\s\S]*?)(\n|$)/gi, '\n');
+  t = t.replace(/\b(This news|This article|According to sources)[\s\S]*?(\n|$)/gi, '\n');
+
+  // 5) Replace multiple blank lines with two
+  t = t.replace(/\n{3,}/g, '\n\n');
+
+  // 6) Trim whitespace
+  t = t.trim();
+
+  return t;
+}
+
+/**
+ * extractJSONIfAny(text)
+ * - Try to find a JSON object in text and parse it (first {} that is valid JSON)
+ * - Return parsed object or null
+ */
+function extractJSONIfAny(text) {
+  if (!text) return null;
+  const RE = /\{(?:[^{}]|"(?:\\.|[^"\\])*")*\}/g;
+  let m;
+  while ((m = RE.exec(text)) !== null) {
+    const candidate = m[0];
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && (parsed.title || parsed.content || parsed.article || parsed.body)) {
+        return parsed;
+      }
+    } catch (e) {
+      // not valid JSON, continue
+    }
+  }
+  return null;
+}
+
+/**
+ * cleanupBoilerplate(text, titleCandidate)
+ * - remove repeated title if duplicated at the start of the content
+ * - remove leading "Title: ..." labels
+ * - remove stray metadata lines like "slug: ..." or "category: ...".
+ */
+function cleanupBoilerplate(text, titleCandidate = '') {
+  let t = text || '';
+  t = t.replace(/^(Title|शीर्षक|Title:|Title -|Title—|शीर्षक:)\s*/i, '');
+
+  if (titleCandidate && t.startsWith(titleCandidate)) {
+    t = t.slice(titleCandidate.length).trim();
+    t = t.replace(/^[:\-\–\—\s]+/, '').trim();
+  }
+
+  t = t.split('\n').filter(line => {
+    if (/^\s*(slug|_id|type|status|category|tags|author|date|title_hn)\s*[:=]/i.test(line)) return false;
+    if (/^https?:\/\/\S+\/(wp-content|uploads|cdn)/i.test(line)) return false;
+    return true;
+  }).join('\n');
+
+  t = t.replace(/\n{3,}/g, '\n\n').trim();
+  return t;
+}
+
+/**
+ * enforceHindiOnly(text)
+ * - optional: keep only Devanagari + punctuation + numerals (useful if you want strict Hindi)
+ * - Use carefully: it will remove English names/places; disable if not desired.
+ */
+function enforceHindiOnly(text) {
+  if (!text) return text;
+  return text.replace(/[^ \n\u0900-\u097F0-9.,।—\-–:;()“”"'?\/%&]/g, '');
+}
+
+/**
+ * parseAIResponse(aiOutput)
+ * - main shared parser used by rewriteWithParallelAI caller
+ * - returns { title: string, content: string }
+ */
+function parseAIResponse(aiOutput) {
+  let raw = aiOutput || '';
+  if (typeof raw !== 'string') raw = String(raw);
+
+  raw = raw.replace(/\u0000/g, '').trim();
+
+  const jsonObj = extractJSONIfAny(raw);
+  if (jsonObj) {
+    const title = (jsonObj.title || jsonObj.headline || jsonObj.title_hn || '').toString().trim();
+    let content = (jsonObj.content || jsonObj.article || jsonObj.body || jsonObj.text || '').toString().trim();
+
+    if (!content) {
+      const collect = (o) => {
+        if (!o) return '';
+        if (typeof o === 'string') return o;
+        if (Array.isArray(o)) return o.map(collect).join('\n\n');
+        if (typeof o === 'object') return Object.values(o).map(collect).join('\n\n');
+        return '';
+      };
+      content = collect(jsonObj).trim();
+      if (title) {
+        content = content.replace(new RegExp(escapeRegExp(title)), '').trim();
+      }
+    }
+
+    content = sanitizeAIText(content);
+    content = cleanupBoilerplate(content, title);
+    // optional: content = enforceHindiOnly(content);
+
+    return {
+      title: (title || '').substring(0, 240).trim(),
+      content: content
+    };
+  }
+
+  let cleaned = sanitizeAIText(raw);
+  const lines = cleaned.split('\n').map(l => l.trim()).filter(Boolean);
+
+  let title = '';
+  let content = cleaned;
+
+  if (lines.length > 0) {
+    const first = lines[0];
+    if (first.length > 8 && first.length < 200 && /[।.?!]$/.test(first) === false) {
+      title = first;
+      content = cleaned.replace(first, '').trim();
+      content = content.replace(/^[:\-\–\—\s]+/, '').trim();
+    } else {
+      const candidate = lines.find(l => l.length > 10 && l.length < 220 && l.split(' ').length < 20);
+      if (candidate) {
+        title = candidate;
+        content = cleaned.replace(candidate, '').trim();
+      }
+    }
+  }
+
+  if (!content) content = cleaned;
+
+  if (title) {
+    content = cleanupBoilerplate(content, title);
+  } else {
+    const sentenceMatch = content.match(/^(.*?[\।\.\?!])\s/);
+    if (sentenceMatch) {
+      title = sentenceMatch[1].slice(0, 200).replace(/[\r\n]/g, ' ').trim();
+      content = content.replace(sentenceMatch[0], '').trim();
+    } else {
+      title = content.split('\n')[0].slice(0, 200).trim();
+      content = content.split('\n').slice(1).join('\n').trim();
+    }
+  }
+
+  content = cleanupBoilerplate(content, title);
+  content = content.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  // optional: content = enforceHindiOnly(content);
+
+  return {
+    title: title || '',
+    content: content || ''
+  };
+}
+
+/* Helper to escape RegExp special chars when removing title from content */
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/* -------------------- PARALLEL AI PROVIDERS (rewrite to HINDI) -------------------- */
+/* Replacement: rewriteWithOpenRouter (returns raw model text) */
 async function rewriteWithOpenRouter(title, content) {
   if (!process.env.OPENROUTER_API_KEY) {
     throw new Error("OpenRouter API key not configured");
   }
 
-  const prompt = `तुम एक अनुभवी हिंदी पत्रकार हो। निम्नलिखित समाचार को कम से कम 300-400 शब्दों में विस्तार से हिंदी में रीराइट करो। 
+  const systemMsg = `You are an expert Hindi journalist and MUST return output as a single valid JSON object only.
+The JSON MUST have exactly two keys: "title" and "content".
+- "title": a short Hindi headline (8-120 characters).
+- "content": full article in Hindi (Devanagari) with clear paragraphs, minimum 300 words.
+DO NOT output any text outside the JSON object. No explanation, no metadata, no markdown, no HTML, no code blocks.
+If you cannot produce JSON, return ONLY plain Hindi text for the article content (no metadata).`;
 
-निम्नलिखित दिशानिर्देशों का पालन करें:
-1. विस्तृत और जानकारीपूर्ण लेख लिखें (कम से कम 300 शब्द)
-2. केवल हिंदी में लिखें, अंग्रेजी नहीं
-3. समाचार को संपूर्ण विवरण दें
-4. तथ्यात्मक और आकर्षक भाषा का प्रयोग करें
-5. यदि मूल लेख में वीडियो है तो उसका उल्लेख करें
+  const userMsg = `शीर्षक: ${title}
+स्रोत सार: ${content.substring(0, 2000)}`;
 
-शीर्षक: ${title}
+  const body = {
+    model: process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-exp:free",
+    messages: [
+      { role: "system", content: systemMsg },
+      { role: "user", content: userMsg }
+    ],
+    max_tokens: 1500,
+    temperature: 0.2
+  };
 
-मुख्य जानकारी: ${content.substring(0, 1000)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://rt-india.com",
-      "X-Title": "Hindi News Rewriter"
-    },
-    body: JSON.stringify({
-      model: process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-exp:free",
-      messages: [{
-        role: "user",
-        content: prompt
-      }],
-      max_tokens: 1500,
-      temperature: 0.4
-    }),
-    timeout: 60000
-  });
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://rt-india.com",
+        "X-Title": "Hindi News Rewriter - Strict JSON"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenRouter API error ${response.status}: ${errorText.substring(0, 200)}`);
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`OpenRouter API error ${res.status}: ${txt.slice(0, 200)}`);
+    }
+
+    const data = await res.json().catch(() => null);
+    if (!data) throw new Error("OpenRouter returned invalid JSON");
+
+    let modelText = null;
+    if (Array.isArray(data.choices) && data.choices.length > 0) {
+      const c0 = data.choices[0];
+      modelText = (c0.message && (c0.message.content || c0.message?.content?.trim())) || c0.text || c0.delta?.content || null;
+    }
+
+    if (!modelText) {
+      modelText = data.output || data.result || (typeof data === "string" ? data : null);
+    }
+
+    if (!modelText) {
+      throw new Error("OpenRouter returned empty content");
+    }
+
+    return modelText;
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error("OpenRouter request timed out");
+    }
+    throw new Error(`OpenRouter failed: ${err.message || err}`);
   }
-
-  const data = await response.json();
-  const aiContent = data?.choices?.[0]?.message?.content;
-
-  if (!aiContent || aiContent.trim().length < 400) {
-    throw new Error("OpenRouter returned empty or too short content");
-  }
-
-  return aiContent;
 }
 
+/* Replacement: rewriteWithGroq (returns raw model text) */
 async function rewriteWithGroq(title, content) {
   if (!process.env.GROQ_API_KEY) {
     throw new Error("Groq API key not configured");
   }
 
-  const prompt = `You are an expert Hindi journalist. Rewrite the following news in Hindi with at least 300-400 words. 
+  const systemMsg = `You are an expert Hindi journalist. MUST return output as a single VALID JSON object only.
+The JSON MUST have exactly two keys: "title" and "content".
+- "title": Hindi headline (8-120 characters).
+- "content": Hindi article in Devanagari, clear paragraphs, minimum 300 words.
+Return only the JSON object. No extra commentary, no HTML, no metadata, no code fences. If JSON is not possible, return only plain Hindi article text.`;
 
-Guidelines:
-1. Write detailed, informative article (minimum 300 words)
-2. Write only in Hindi Devanagari script
-3. Provide complete details and context
-4. Use factual and engaging language
-5. Mention if there are videos in the original article
+  const userMsg = `Title: ${title}
+Content summary: ${content.substring(0, 2000)}`;
 
-Title: ${title}
+  const body = {
+    model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+    messages: [
+      { role: "system", content: systemMsg },
+      { role: "user", content: userMsg }
+    ],
+    max_tokens: 1500,
+    temperature: 0.2
+  };
 
-Content: ${content.substring(0, 1000)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 50000);
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
-      messages: [{
-        role: "user",
-        content: prompt
-      }],
-      max_tokens: 1500,
-      temperature: 0.4
-    }),
-    timeout: 40000
-  });
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Groq API error ${response.status}: ${errorText.substring(0, 200)}`);
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`Groq API error ${res.status}: ${txt.slice(0, 200)}`);
+    }
+
+    const data = await res.json().catch(() => null);
+    if (!data) throw new Error("Groq returned invalid JSON");
+
+    let modelText = null;
+    if (Array.isArray(data.choices) && data.choices.length > 0) {
+      const c0 = data.choices[0];
+      modelText = (c0.message && (c0.message.content || c0.message?.content?.trim())) || c0.text || c0.delta?.content || null;
+    }
+
+    if (!modelText) {
+      modelText = data.output || data.result || (typeof data === "string" ? data : null);
+    }
+
+    if (!modelText) {
+      throw new Error("Groq returned empty content");
+    }
+
+    return modelText;
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error("Groq request timed out");
+    }
+    throw new Error(`Groq failed: ${err.message || err}`);
   }
-
-  const data = await response.json();
-  const aiContent = data?.choices?.[0]?.message?.content;
-
-  if (!aiContent || aiContent.trim().length < 400) {
-    throw new Error("Groq returned empty or too short content");
-  }
-
-  return aiContent;
 }
 
 function generateFallbackHindi(title, content) {
@@ -851,7 +1084,7 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
       const aiContent = result.value.result;
 
       const parsed = parseAIResponse(aiContent);
-      const wordCount = parsed.content.split(/\s+/).length;
+      const wordCount = (parsed.content || '').split(/\s+/).filter(Boolean).length;
 
       if (parsed.content && wordCount >= 250) {
         let finalContent = parsed.content;
@@ -866,6 +1099,8 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
           provider: result.value.provider,
           wordCount: wordCount
         };
+      } else {
+        console.warn(`AI provider ${result.value.provider} produced too-short content (${wordCount} words) — ignoring`);
       }
     }
   }
@@ -882,37 +1117,6 @@ async function rewriteWithParallelAI(title, content, hasVideos = false) {
     provider: "fallback",
     wordCount: wordCount
   };
-}
-
-/* -------------------- Helper Functions -------------------- */
-function parseAIResponse(aiOutput) {
-  if (!aiOutput) return { title: "", content: "" };
-
-  const text = aiOutput.trim();
-
-  let cleaned = text
-    .replace(/<[^>]*>/g, '')
-    .replace(/[*_~`#\[\]]/g, '')
-    .replace(/^(शीर्षक|लेख|समाचार|आर्टिकल|न्यूज़|Title|Article|News):\s*/gi, '')
-    .replace(/^(Here is|This is|I have|According to)\s+/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  const lines = cleaned.split('\n').filter(line => line.trim().length > 0);
-
-  if (lines.length === 0) {
-    return { title: "", content: "" };
-  }
-
-  let title = lines[0].trim();
-  if (title.length > 150) {
-    const sentences = title.split(/[।.!?]/);
-    title = sentences[0] || title.substring(0, 100);
-  }
-
-  const content = lines.slice(1).join('\n\n').trim() || lines[0];
-
-  return { title, content };
 }
 
 /* -------------------- Fetch Article Image -------------------- */
@@ -1192,7 +1396,6 @@ async function processAllNews() {
     const regionItems = await fetchRegionFirst("uttarakhand", 20);
     if (regionItems.length > 0) {
       allItems.push(...regionItems.map(it => {
-        // ensure meta marks region-priority (so logs / decisions can use it later)
         it.meta = { ...(it.meta || {}), region_priority: true, sourceName: it.meta?.sourceName || it.source || "region" };
         return it;
       }));
@@ -1200,7 +1403,6 @@ async function processAllNews() {
     } else {
       sourceStats['Uttarakhand (region)'] = 0;
     }
-    // small pause to reduce rate-limit risk
     await sleep(500);
   } catch (e) {
     console.warn("   ❌ Region-first fetch failed:", e.message);
@@ -1209,7 +1411,6 @@ async function processAllNews() {
 
   // ---- THEN PROCESS REMAINING SOURCES BY PRIORITY (skip explicit uttarakhand RSS sources already included) ----
   for (const source of sourcesByPriority) {
-    // skip if this source is a known Uttarakhand RSS we already fetched in region-first
     if ((source.name || "").toLowerCase().includes("uttarakhand")) {
       console.log(`   ⏭️ Skipping (already covered by region-first): ${source.name}`);
       continue;
