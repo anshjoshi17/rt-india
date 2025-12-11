@@ -1586,7 +1586,13 @@ app.get("/api/news", async (req, res) => {
       .range(offset, offset + pageSize - 1);
 
     if (genre && genre !== "All") query = query.eq("genre", genre);
-    if (region && region !== "All") query = query.eq("region", region);
+
+    // region param: allow case-insensitive substring matching for robustness
+    if (region && region !== "All") {
+      const regionParam = String(region || "").trim();
+      // Use ILIKE so 'india', 'India', 'भारत', 'उत्तराखंड' etc can match
+      query = query.ilike("region", `%${regionParam}%`);
+    }
 
     const { data, error, count } = await query;
 
@@ -1642,35 +1648,89 @@ app.get("/api/news/:slug", async (req, res) => {
   }
 });
 
+/* ---------------------------
+   Robust region endpoint
+   - case-insensitive handling
+   - capitalized attempt
+   - ilike fallback (substring), ordered by published_at
+   --------------------------- */
 app.get("/api/region/:region", async (req, res) => {
   try {
-    const regionParam = (req.params.region || "").toLowerCase();
+    const rawRegion = (req.params.region || "").toString().trim();
+    const regionLower = rawRegion.toLowerCase();
     const limit = Math.min(Number(req.query.limit) || 12, 100);
 
-    if (!regionParam) {
+    if (!rawRegion) {
       return res.status(400).json({ success: false, error: "Region required" });
     }
 
-    const { data, error } = await supabase
+    console.log(`[region API] requested region: "${rawRegion}" -> normalized: "${regionLower}", limit: ${limit}`);
+
+    // 1) Try exact match on normalized lower-case value (common case)
+    // NOTE: If your DB stores region values in lower-case, this will match directly.
+    let { data, error } = await supabase
       .from("ai_news")
       .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta")
-      .eq("region", regionParam)
-      .order("created_at", { ascending: false })
+      .eq("region", regionLower)
+      .order("published_at", { ascending: false })
       .limit(limit);
 
     if (error) {
-      console.error("Database error:", error);
+      console.error("[region API] supabase error (exact):", error);
       return res.status(500).json({ success: false, error: error.message });
     }
 
-    res.json({ success: true, data: data || [] });
-  } catch (error) {
-    console.error("API error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Server error",
-      message: error.message
-    });
+    // 2) If empty, try capitalized exact match and ILIKE substring fallback
+    if ((!data || data.length === 0)) {
+      const capitalized = rawRegion.charAt(0).toUpperCase() + rawRegion.slice(1).toLowerCase();
+
+      // Try capitalized exact match
+      const { data: dataCap, error: errCap } = await supabase
+        .from("ai_news")
+        .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta")
+        .eq("region", capitalized)
+        .order("published_at", { ascending: false })
+        .limit(limit);
+
+      if (errCap) {
+        console.warn("[region API] supabase error (capitalized):", errCap);
+      }
+
+      if (dataCap && dataCap.length > 0) {
+        console.log(`[region API] matched capitalized region "${capitalized}" -> ${dataCap.length} items`);
+        return res.json({ success: true, data: dataCap });
+      }
+
+      // Fallback: case-insensitive substring match using ILIKE
+      const { data: dataIlike, error: errIlike } = await supabase
+        .from("ai_news")
+        .select("id,title,slug,short_desc,image_url,region,genre,published_at,created_at,meta")
+        .ilike("region", `%${regionLower}%`)
+        .order("published_at", { ascending: false })
+        .limit(limit);
+
+      if (errIlike) {
+        console.error("[region API] supabase error (ilike):", errIlike);
+        return res.status(500).json({ success: false, error: errIlike.message });
+      }
+
+      if (dataIlike && dataIlike.length > 0) {
+        console.log(`[region API] ilike matched ${dataIlike.length} items (region contains "${regionLower}")`);
+        return res.json({ success: true, data: dataIlike });
+      }
+
+      // Last-resort: return empty array (front-end will show fallback message)
+      console.log(`[region API] no items found for region "${rawRegion}" (exact/capitalized/ilike tried)`);
+      return res.json({ success: true, data: [] });
+    }
+
+    // If exact-match returned results
+    console.log(`[region API] exact-match returned ${data.length} items for "${regionLower}"`);
+    return res.json({ success: true, data });
+
+  } catch (err) {
+    console.error("[region API] unexpected error:", err && (err.message || err));
+    res.status(500).json({ success: false, error: (err && err.message) || "Server error" });
   }
 });
 
