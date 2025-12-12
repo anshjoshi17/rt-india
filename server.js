@@ -1,14 +1,15 @@
 // server.js - ENHANCED VERSION: LATEST HINDI NEWS (Uttarakhand → National → International)
-// Focus: fetch latest live news, rewrite into Hindi, save to Supabase, delete >2 days old
-
+// Main orchestration file - RSS and API fetching separated into modules
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const RSSParser = require("rss-parser");
 const slugify = require("slugify");
-const cheerio = require("cheerio");
 const { createClient } = require("@supabase/supabase-js");
+
+// Import separated modules
+const { fetchRSSFeed, RSS_SOURCES } = require("./rss-fetcher");
+const { fetchFromNewsAPI, fetchFromGNewsAPI, API_SOURCES } = require("./api-fetchers");
 
 const app = express();
 
@@ -68,93 +69,13 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* -------------------- RSS Parser -------------------- */
-const parser = new RSSParser({
-  customFields: {
-    item: [
-      ['media:content', 'media:content', { keepArray: true }],
-      ['media:thumbnail', 'media:thumbnail', { keepArray: true }],
-      ['media:group', 'media:group'],
-      ['enclosure', 'enclosure', { keepArray: true }]
-    ]
-  }
-});
-
 /* -------------------- Supabase -------------------- */
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-/* -------------------- NEWS SOURCES (LATEST, HINDI FOCUS) -------------------- */
+/* -------------------- COMBINED NEWS SOURCES (LATEST, HINDI FOCUS) -------------------- */
 const NEWS_SOURCES = {
-  UTTARAKHAND_NEWS18: {
-    priority: 1,
-    name: "News18 Uttarakhand",
-    type: "RSS",
-    config: {
-      url: "https://hindi.news18.com/rss/uttarakhand/",
-      maxItems: 12,
-      freshness: "latest"
-    }
-  },
-
-  UTTARAKHAND_AMARUJALA: {
-    priority: 2,
-    name: "Amar Ujala Uttarakhand",
-    type: "RSS",
-    config: {
-      url: "https://www.amarujala.com/rss/uttarakhand.xml",
-      maxItems: 12,
-      freshness: "latest"
-    }
-  },
-
-  INDIA_AAJ_TAK: {
-    priority: 3,
-    name: "AajTak - India (Hindi)",
-    type: "RSS",
-    config: {
-      url: "https://aajtak.intoday.in/rssfeeds/?id=home",
-      maxItems: 15,
-      freshness: "latest"
-    }
-  },
-
-  INDIA_GNEWS_HI: {
-    priority: 4,
-    name: "GNews India (Hindi)",
-    type: "GNEWS",
-    config: {
-      q: "भारत OR India",
-      lang: "hi",
-      country: "in",
-      max: 15,
-      sortby: "publishedAt"
-    }
-  },
-
-  INTERNATIONAL_GNEWS: {
-    priority: 5,
-    name: "International News (GNews)",
-    type: "GNEWS",
-    config: {
-      q: "world OR international",
-      lang: "en", // fetch in English, then rewrite to Hindi
-      max: 10,
-      sortby: "publishedAt"
-    }
-  },
-
-  INTERNATIONAL_NEWSAPI: {
-    priority: 6,
-    name: "World News (NewsAPI)",
-    type: "NEWSAPI",
-    config: {
-      q: "world OR international",
-      language: "en",
-      pageSize: 10,
-      sortBy: "publishedAt",
-      from: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    }
-  }
+  ...RSS_SOURCES,
+  ...API_SOURCES
 };
 
 /* -------------------- Utils -------------------- */
@@ -164,11 +85,6 @@ function makeSlug(text) {
     "-" +
     Math.random().toString(36).slice(2, 7)
   );
-}
-
-function sanitizeXml(xml) {
-  if (!xml) return xml;
-  return xml.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)/g, "&amp;");
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -286,198 +202,6 @@ const REGION_KEYWORDS = {
   ]
 };
 
-/* -------------------- ENHANCED NEWS API FUNCTIONS FOR LATEST NEWS -------------------- */
-
-// 1. NEWSAPI.org Integration with LATEST news
-async function fetchFromNewsAPI(params) {
-  try {
-    const { q, language, pageSize, sortBy, from } = params;
-    const apiKey = process.env.NEWSAPI_KEY;
-
-    if (!apiKey) {
-      console.warn("NEWSAPI_KEY not configured, skipping NewsAPI");
-      return [];
-    }
-
-    let url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&language=${language || 'hi'}&pageSize=${pageSize || 10}&sortBy=${sortBy || 'publishedAt'}&apiKey=${apiKey}`;
-
-    if (from) {
-      url += `&from=${from}`;
-    } else {
-      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      url += `&from=${yesterday.split('T')[0]}`;
-    }
-
-    console.log(`📡 Fetching LATEST from NewsAPI: ${q} (lang=${language || 'hi'})`);
-
-    const response = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 15000
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`NewsAPI HTTP ${response.status}: ${errorText.substring(0, 100)}`);
-    }
-
-    const data = await response.json();
-
-    if (data.status !== "ok") {
-      console.warn(`NewsAPI error: ${data.message}`);
-      return [];
-    }
-
-    let articles = data.articles || [];
-    articles.sort((a, b) => {
-      const dateA = new Date(a.publishedAt || 0);
-      const dateB = new Date(b.publishedAt || 0);
-      return dateB - dateA;
-    });
-
-    console.log(`✅ NewsAPI returned ${articles.length} LATEST articles`);
-
-    if (articles.length > 0) {
-      const latestDate = new Date(articles[0].publishedAt).toLocaleString('hi-IN');
-      console.log(`   📅 Latest article: ${latestDate}`);
-    }
-
-    return articles;
-
-  } catch (error) {
-    console.warn(`❌ NewsAPI fetch failed:`, error.message);
-    return [];
-  }
-}
-
-// 2. GNews.io Integration with LATEST news
-async function fetchFromGNewsAPI(params) {
-  try {
-    const { q, lang, country, max, sortby } = params;
-    const apiKey = process.env.GNEWS_API_KEY;
-
-    if (!apiKey) {
-      console.warn("GNEWS_API_KEY not configured, skipping GNews");
-      return [];
-    }
-
-    const baseUrl = country ?
-      `https://gnews.io/api/v4/top-headlines?q=${encodeURIComponent(q)}&lang=${lang || 'hi'}&country=${country}&max=${max || 10}&apikey=${apiKey}` :
-      `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&lang=${lang || 'hi'}&max=${max || 10}&apikey=${apiKey}`;
-
-    let url = baseUrl;
-    if (sortby) {
-      url += `&sortby=${sortby}`;
-    }
-
-    console.log(`📡 Fetching LATEST from GNews: ${q} (lang=${lang || 'hi'})`);
-
-    const response = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 15000
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`GNews HTTP ${response.status}: ${errorText.substring(0, 100)}`);
-    }
-
-    const data = await response.json();
-
-    let articles = data.articles || [];
-
-    articles.sort((a, b) => {
-      const dateA = new Date(a.publishedAt || 0);
-      const dateB = new Date(b.publishedAt || 0);
-      return dateB - dateA;
-    });
-
-    console.log(`✅ GNews returned ${articles.length} LATEST articles`);
-
-    if (articles.length > 0) {
-      const latestDate = new Date(articles[0].publishedAt).toLocaleString('hi-IN');
-      console.log(`   📅 Latest article: ${latestDate}`);
-    }
-
-    return articles;
-
-  } catch (error) {
-    console.warn(`❌ GNews fetch failed:`, error.message);
-    return [];
-  }
-}
-
-// 3. RSS Feed Fetcher
-async function fetchRSSFeed(feedUrl, maxItems = 10) {
-  try {
-    console.log(`📡 Fetching LATEST RSS: ${feedUrl}`);
-
-    const response = await fetch(feedUrl, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      timeout: 15000
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    let xmlText = await response.text();
-    xmlText = sanitizeXml(xmlText);
-
-    const feed = await parser.parseString(xmlText);
-
-    if (!feed.items || feed.items.length === 0) {
-      console.warn(`No items in feed: ${feedUrl}`);
-      return [];
-    }
-
-    let items = feed.items
-      .sort((a, b) => {
-        const dateA = new Date(a.pubDate || 0);
-        const dateB = new Date(b.pubDate || 0);
-        return dateB - dateA;
-      })
-      .slice(0, maxItems);
-
-    console.log(`✅ Fetched ${items.length} LATEST items from RSS: ${feedUrl}`);
-
-    if (items.length > 0) {
-      const latestDate = new Date(items[0].pubDate).toLocaleString('hi-IN');
-      console.log(`   📅 Latest RSS item: ${latestDate}`);
-    }
-
-    return items.map(item => {
-      let image = null;
-
-      if (item.enclosure && item.enclosure.url && item.enclosure.type && item.enclosure.type.startsWith('image/')) {
-        image = item.enclosure.url;
-      } else if (item['media:content'] && item['media:content'].url) {
-        image = item['media:content'].url;
-      } else if (item['media:thumbnail'] && item['media:thumbnail'].url) {
-        image = item['media:thumbnail'].url;
-      } else if (item.content && item.content.includes('<img')) {
-        const $ = cheerio.load(item.content);
-        const firstImg = $('img').first();
-        if (firstImg.length) {
-          image = firstImg.attr('src');
-        }
-      }
-
-      return {
-        title: item.title || "No title",
-        description: item.contentSnippet || item.description || item.title || "",
-        url: item.link || item.guid,
-        image: image,
-        pubDate: item.pubDate,
-        source: feed.title || feedUrl
-      };
-    });
-
-  } catch (error) {
-    console.warn(`❌ Failed to fetch RSS ${feedUrl}:`, error.message);
-    return [];
-  }
-}
-
 /* -------------------- Normalization & Content Enhancement -------------------- */
 function normalizeArticle(apiArticle, sourceConfig) {
   if (sourceConfig.type === "NEWSAPI") {
@@ -547,7 +271,7 @@ async function fetchArticleBody(url) {
     }
 
     const html = await res.text();
-    const $ = cheerio.load(html);
+    const $ = require("cheerio").load(html);
 
     $('script, style, nav, footer, header, aside, .sidebar, .advertisement, .ads, .social-share').remove();
 
@@ -629,7 +353,7 @@ async function extractVideosFromArticle(url) {
     if (!res.ok) return null;
 
     const html = await res.text();
-    const $ = cheerio.load(html);
+    const $ = require("cheerio").load(html);
 
     const videos = [];
 
@@ -1087,7 +811,7 @@ async function fetchArticleImage(url) {
     if (!response.ok) return null;
 
     const html = await response.text();
-    const $ = cheerio.load(html);
+    const $ = require("cheerio").load(html);
 
     const imageSelectors = [
       'meta[property="og:image"]',
