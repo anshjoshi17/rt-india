@@ -1,254 +1,514 @@
 // routes/adminRoutes.js
 const express = require('express');
 
-/**
- * Admin routes factory
- * @param {Object} deps
- * @param {string} deps.SUPABASE_URL - e.g. process.env.SUPABASE_URL
- * @param {import('@supabase/supabase-js').SupabaseClient} deps.supabaseAdmin - supabase client instantiated with service role key
- * @param {string[]} deps.ADMIN_EMAILS - array of allowed admin emails (lowercase)
- * @param {string} deps.SUPABASE_ANON_KEY - supabase anon public key (used when validating tokens via auth/v1/user)
- */
 module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMIN_EMAILS = [], SUPABASE_ANON_KEY = '' }) {
   if (!SUPABASE_URL) throw new Error('SUPABASE_URL required for adminRoutesFactory');
   if (!supabaseAdmin) throw new Error('supabaseAdmin client required for adminRoutesFactory');
 
   const router = express.Router();
 
-  // small helper - verify token belongs to an allowed admin email
-  async function requireAdmin(req, res, next) {
+  // Add CORS middleware for admin routes
+  router.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    next();
+  });
+
+  // Debug middleware
+  router.use((req, res, next) => {
+    console.log(`[ADMIN] ${req.method} ${req.path}`, {
+      auth: req.headers.authorization ? 'present' : 'missing',
+      timestamp: new Date().toISOString()
+    });
+    next();
+  });
+
+  // Helper to verify admin token
+  async function verifyAdminToken(token) {
     try {
-      const authHeader = req.headers.authorization || '';
-      const token = (authHeader.split(' ')[1] || '').trim();
-      if (!token) return res.status(401).json({ error: 'Missing Authorization token' });
+      if (!token) {
+        console.log('[ADMIN] No token provided');
+        return null;
+      }
 
-      // Supabase v1 user endpoint works with Bearer token.
-      // Include anon key for reliability.
-      const headers = {
-        Authorization: `Bearer ${token}`
-      };
-      if (SUPABASE_ANON_KEY) headers.apikey = SUPABASE_ANON_KEY;
+      // Check if token is the anon key (shouldn't be used for admin)
+      if (token === SUPABASE_ANON_KEY) {
+        console.warn('[ADMIN] Token matches anon key - rejecting');
+        return null;
+      }
 
-      const r = await fetch(`${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/user`, {
-        method: 'GET',
-        headers
+      // Verify token with Supabase
+      const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'apikey': SUPABASE_ANON_KEY
+        }
       });
 
-      if (!r.ok) {
-        const txt = await r.text().catch(() => '');
-        // return details but keep it concise
-        console.warn('requireAdmin: /auth/v1/user returned', r.status, txt || '(no body)');
-        return res.status(401).json({ error: 'Invalid token', details: txt || `status ${r.status}` });
+      if (!response.ok) {
+        console.log(`[ADMIN] Token verification failed: ${response.status}`);
+        return null;
       }
 
-      const user = await r.json().catch(() => null);
-      if (!user || !user.email) {
-        console.warn('requireAdmin: user endpoint returned no email', user);
-        return res.status(401).json({ error: 'Unable to fetch user info' });
+      const user = await response.json();
+      console.log(`[ADMIN] Verified user: ${user.email}`);
+      
+      // Check if user is in admin list
+      const email = user.email.toLowerCase();
+      if (ADMIN_EMAILS.length > 0 && !ADMIN_EMAILS.includes(email)) {
+        console.log(`[ADMIN] User ${email} not in admin list`);
+        return null;
       }
 
-      const email = String(user.email || '').toLowerCase();
-      console.info('requireAdmin: authenticated user email ->', email);
-
-      if (!ADMIN_EMAILS.includes(email)) {
-        console.warn('requireAdmin: forbidden - email not in ADMIN_EMAILS:', email);
-        return res.status(403).json({ error: 'Forbidden - not an admin' });
-      }
-
-      // attach minimal user info
-      req.adminUser = { id: user.id, email };
-      next();
-    } catch (err) {
-      console.error('requireAdmin error', err && err.message ? err.message : err);
-      return res.status(500).json({ error: 'Auth check failed' });
+      return user;
+    } catch (error) {
+      console.error('[ADMIN] Token verification error:', error.message);
+      return null;
     }
   }
 
-  /* --------------------
-     GET /admin/articles
-     query: q, limit, offset, include_deleted
-  -------------------- */
+  // Middleware to require admin authentication
+  async function requireAdmin(req, res, next) {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const token = authHeader.replace('Bearer ', '').trim();
+
+      const user = await verifyAdminToken(token);
+      
+      if (!user) {
+        console.log('[ADMIN] Authentication failed');
+        return res.status(401).json({ 
+          error: 'Authentication required',
+          message: 'Invalid or missing authentication token'
+        });
+      }
+
+      req.user = user;
+      next();
+    } catch (error) {
+      console.error('[ADMIN] Auth middleware error:', error);
+      res.status(500).json({ 
+        error: 'Authentication error',
+        message: error.message 
+      });
+    }
+  }
+
+  // GET /admin/articles - List articles with pagination
   router.get('/articles', requireAdmin, async (req, res) => {
     try {
-      const q = (req.query.q || '').trim();
-      const limit = Math.min(500, parseInt(req.query.limit || '200', 10));
-      const offset = parseInt(req.query.offset || '0', 10);
-      const includeDeleted = (req.query.include_deleted || 'false').toLowerCase() === 'true';
+      const { 
+        q = '', 
+        limit = '30', 
+        offset = '0',
+        include_deleted = 'false' 
+      } = req.query;
+
+      const parsedLimit = Math.min(parseInt(limit, 10) || 30, 100);
+      const parsedOffset = Math.max(parseInt(offset, 10) || 0, 0);
+      const includeDeleted = include_deleted === 'true';
+
+      console.log(`[ADMIN] Fetching articles: limit=${parsedLimit}, offset=${parsedOffset}, q=${q}`);
 
       let query = supabaseAdmin
         .from('ai_news')
         .select('*', { count: 'exact' })
-        .order('published_at', { ascending: false })
-        .range(offset, offset + limit - 1);
+        .order('created_at', { ascending: false });
 
+      // Apply search if query exists
+      if (q && q.trim()) {
+        const searchTerm = `%${q.trim()}%`;
+        query = query.or(`title.ilike.${searchTerm},short_desc.ilike.${searchTerm},region.ilike.${searchTerm},genre.ilike.${searchTerm}`);
+      }
+
+      // Exclude soft-deleted unless requested
       if (!includeDeleted) {
         query = query.is('deleted_at', null);
       }
 
-      if (q) {
-        const escaped = q.replace(/%/g, '\\%').replace(/,/g, ' ');
-        query = query.or(
-          `title.ilike.%${escaped}%,short_desc.ilike.%${escaped}%,region.ilike.%${escaped}%,genre.ilike.%${escaped}%,slug.ilike.%${escaped}%`
-        );
-      }
+      // Apply pagination
+      const { data, error, count } = await query
+        .range(parsedOffset, parsedOffset + parsedLimit - 1);
 
-      const { data, error, count } = await query;
       if (error) {
-        console.error('GET /admin/articles supabase error:', error);
-        return res.status(500).json({ error: error.message });
+        console.error('[ADMIN] Database error:', error);
+        return res.status(500).json({ 
+          error: 'Database error', 
+          details: error.message 
+        });
       }
 
-      res.json({ data, count });
-    } catch (err) {
-      console.error('GET /admin/articles error', err && err.message ? err.message : err);
-      res.status(500).json({ error: 'Server error' });
+      console.log(`[ADMIN] Retrieved ${data?.length || 0} articles, total: ${count || 0}`);
+
+      res.json({
+        success: true,
+        data: data || [],
+        pagination: {
+          limit: parsedLimit,
+          offset: parsedOffset,
+          total: count || 0,
+          hasMore: (count || 0) > (parsedOffset + parsedLimit)
+        }
+      });
+
+    } catch (error) {
+      console.error('[ADMIN] Articles list error:', error);
+      res.status(500).json({ 
+        success: false,
+        error: 'Server error',
+        message: error.message 
+      });
     }
   });
 
-  /* --------------------
-     POST /admin/articles  -> create new article
-  -------------------- */
+  // GET /admin/articles/:id - Get single article
+  router.get('/articles/:id', requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      console.log(`[ADMIN] Fetching article ${id}`);
+
+      const { data, error } = await supabaseAdmin
+        .from('ai_news')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (error) {
+        console.error('[ADMIN] Database error:', error);
+        return res.status(500).json({ 
+          error: 'Database error', 
+          details: error.message 
+        });
+      }
+
+      if (!data) {
+        return res.status(404).json({ 
+          success: false,
+          error: 'Article not found' 
+        });
+      }
+
+      res.json({
+        success: true,
+        data
+      });
+
+    } catch (error) {
+      console.error('[ADMIN] Single article error:', error);
+      res.status(500).json({ 
+        success: false,
+        error: 'Server error',
+        message: error.message 
+      });
+    }
+  });
+
+  // POST /admin/articles - Create new article
   router.post('/articles', requireAdmin, async (req, res) => {
     try {
-      const payload = req.body || {};
-      const record = {
-        title: payload.title || 'Untitled',
-        slug: payload.slug || null,
+      const payload = req.body;
+      
+      // Validate required fields
+      if (!payload.title || !payload.title.trim()) {
+        return res.status(400).json({
+          success: false,
+          error: 'Title is required'
+        });
+      }
+
+      // Generate slug if not provided
+      if (!payload.slug) {
+        const slug = payload.title
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '');
+        payload.slug = slug;
+      }
+
+      // Set default values
+      const now = new Date().toISOString();
+      const article = {
+        title: payload.title.trim(),
+        slug: payload.slug,
         source_url: payload.source_url || '',
         ai_content: payload.ai_content || '',
-        short_desc: payload.short_desc || (payload.ai_content || '').slice(0, 250),
-        image_url: payload.image_url || null,
-        published_at: payload.published_at || new Date().toISOString(),
-        region: payload.region || null,
-        genre: payload.genre || null,
-        meta: payload.meta || {}
+        short_desc: payload.short_desc || (payload.ai_content || '').substring(0, 200) + '...',
+        image_url: payload.image_url || `https://picsum.photos/seed/${Date.now()}/1200/630`,
+        published_at: payload.published_at || now,
+        region: payload.region || 'india',
+        genre: payload.genre || 'Other',
+        created_at: now,
+        updated_at: now,
+        meta: {
+          ...(payload.meta || {}),
+          created_by: req.user.email,
+          created_at: now,
+          is_manual: true
+        }
       };
 
-      const { data, error } = await supabaseAdmin.from('ai_news').insert([record]).select().single();
+      console.log(`[ADMIN] Creating article: ${article.title}`);
+
+      const { data, error } = await supabaseAdmin
+        .from('ai_news')
+        .insert([article])
+        .select()
+        .single();
+
       if (error) {
-        console.error('POST /admin/articles supabase error:', error);
-        return res.status(500).json({ error: error.message });
+        console.error('[ADMIN] Create error:', error);
+        return res.status(500).json({ 
+          success: false,
+          error: 'Database error', 
+          details: error.message 
+        });
       }
 
+      // Log to audit trail
       try {
-        await supabaseAdmin.from('admin_audit').insert([{
-          admin_email: req.adminUser.email,
+        await supabaseAdmin.from('admin_audit').insert({
+          admin_email: req.user.email,
           action: 'create',
           article_id: data.id,
-          payload: record,
-          created_at: new Date().toISOString()
-        }]);
-      } catch (e) {
-        // ignore audit errors
+          article_title: data.title,
+          created_at: now
+        });
+      } catch (auditError) {
+        console.warn('[ADMIN] Audit log error:', auditError.message);
       }
 
-      res.status(201).json({ data });
-    } catch (err) {
-      console.error('POST /admin/articles error', err && err.message ? err.message : err);
-      res.status(500).json({ error: 'Server error' });
+      res.status(201).json({
+        success: true,
+        message: 'Article created successfully',
+        data
+      });
+
+    } catch (error) {
+      console.error('[ADMIN] Create article error:', error);
+      res.status(500).json({ 
+        success: false,
+        error: 'Server error',
+        message: error.message 
+      });
     }
   });
 
-  /* --------------------
-     PUT /admin/articles/:id -> update full record
-  -------------------- */
+  // PUT /admin/articles/:id - Update article
   router.put('/articles/:id', requireAdmin, async (req, res) => {
     try {
       const { id } = req.params;
-      const payload = req.body || {};
-      delete payload.id;
+      const payload = req.body;
+      
+      console.log(`[ADMIN] Updating article ${id}`);
 
-      const { data, error } = await supabaseAdmin.from('ai_news').update(payload).eq('id', id).select().single();
-      if (error) {
-        console.error('PUT /admin/articles/:id supabase error:', error);
-        return res.status(500).json({ error: error.message });
+      // Remove fields that shouldn't be updated
+      delete payload.id;
+      delete payload.created_at;
+      
+      // Add update timestamp
+      payload.updated_at = new Date().toISOString();
+      
+      // Update meta field
+      if (payload.meta) {
+        payload.meta = {
+          ...payload.meta,
+          updated_by: req.user.email,
+          updated_at: payload.updated_at
+        };
       }
 
+      const { data, error } = await supabaseAdmin
+        .from('ai_news')
+        .update(payload)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('[ADMIN] Update error:', error);
+        return res.status(500).json({ 
+          success: false,
+          error: 'Database error', 
+          details: error.message 
+        });
+      }
+
+      if (!data) {
+        return res.status(404).json({ 
+          success: false,
+          error: 'Article not found' 
+        });
+      }
+
+      // Log to audit trail
       try {
-        await supabaseAdmin.from('admin_audit').insert([{
-          admin_email: req.adminUser.email,
+        await supabaseAdmin.from('admin_audit').insert({
+          admin_email: req.user.email,
           action: 'update',
           article_id: id,
-          payload,
+          article_title: data.title,
           created_at: new Date().toISOString()
-        }]);
-      } catch (e) {}
+        });
+      } catch (auditError) {
+        console.warn('[ADMIN] Audit log error:', auditError.message);
+      }
 
-      res.json({ data });
-    } catch (err) {
-      console.error('PUT /admin/articles/:id error', err && err.message ? err.message : err);
-      res.status(500).json({ error: 'Server error' });
+      res.json({
+        success: true,
+        message: 'Article updated successfully',
+        data
+      });
+
+    } catch (error) {
+      console.error('[ADMIN] Update article error:', error);
+      res.status(500).json({ 
+        success: false,
+        error: 'Server error',
+        message: error.message 
+      });
     }
   });
 
-  /* --------------------
-     DELETE /admin/articles/:id -> hard delete (or soft if requested)
-  -------------------- */
+  // DELETE /admin/articles/:id - Delete article
   router.delete('/articles/:id', requireAdmin, async (req, res) => {
     try {
       const { id } = req.params;
-      const soft = (req.query.soft || 'false').toLowerCase() === 'true';
+      const { soft = 'false' } = req.query;
+      const isSoftDelete = soft.toLowerCase() === 'true';
 
-      if (soft) {
-        const { data, error } = await supabaseAdmin.from('ai_news').update({ deleted_at: new Date().toISOString() }).eq('id', id).select().single();
-        if (error) {
-          console.error('DELETE soft supabase error:', error);
-          return res.status(500).json({ error: error.message });
-        }
+      console.log(`[ADMIN] Deleting article ${id} (soft: ${isSoftDelete})`);
 
-        try {
-          await supabaseAdmin.from('admin_audit').insert([{
-            admin_email: req.adminUser.email,
-            action: 'soft_delete',
-            article_id: id,
-            payload: null,
-            created_at: new Date().toISOString()
-          }]);
-        } catch (e) {}
+      let result;
+      
+      if (isSoftDelete) {
+        // Soft delete - mark as deleted
+        const { data, error } = await supabaseAdmin
+          .from('ai_news')
+          .update({ 
+            deleted_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', id)
+          .select()
+          .single();
 
-        return res.json({ data, message: 'soft deleted' });
+        if (error) throw error;
+        result = data;
       } else {
-        const { data, error } = await supabaseAdmin.from('ai_news').delete().eq('id', id).select().single();
-        if (error) {
-          console.error('DELETE hard supabase error:', error);
-          return res.status(500).json({ error: error.message });
-        }
+        // Hard delete - remove from database
+        const { data, error } = await supabaseAdmin
+          .from('ai_news')
+          .delete()
+          .eq('id', id)
+          .select()
+          .single();
 
-        try {
-          await supabaseAdmin.from('admin_audit').insert([{
-            admin_email: req.adminUser.email,
-            action: 'delete',
-            article_id: id,
-            payload: null,
-            created_at: new Date().toISOString()
-          }]);
-        } catch (e) {}
-
-        return res.json({ data, message: 'deleted' });
+        if (error) throw error;
+        result = data;
       }
-    } catch (err) {
-      console.error('DELETE /admin/articles/:id error', err && err.message ? err.message : err);
-      res.status(500).json({ error: 'Server error' });
+
+      if (!result) {
+        return res.status(404).json({ 
+          success: false,
+          error: 'Article not found' 
+        });
+      }
+
+      // Log to audit trail
+      try {
+        await supabaseAdmin.from('admin_audit').insert({
+          admin_email: req.user.email,
+          action: isSoftDelete ? 'soft_delete' : 'hard_delete',
+          article_id: id,
+          article_title: result.title,
+          created_at: new Date().toISOString()
+        });
+      } catch (auditError) {
+        console.warn('[ADMIN] Audit log error:', auditError.message);
+      }
+
+      res.json({
+        success: true,
+        message: `Article ${isSoftDelete ? 'soft deleted' : 'deleted'} successfully`,
+        data: result
+      });
+
+    } catch (error) {
+      console.error('[ADMIN] Delete error:', error);
+      res.status(500).json({ 
+        success: false,
+        error: 'Database error',
+        message: error.message 
+      });
     }
   });
 
-  /* --------------------
-     GET /admin/article/:id -> single article
-  -------------------- */
-  router.get('/article/:id', requireAdmin, async (req, res) => {
+  // GET /admin/stats - Get admin statistics
+  router.get('/stats', requireAdmin, async (req, res) => {
     try {
-      const { id } = req.params;
-      const { data, error } = await supabaseAdmin.from('ai_news').select('*').eq('id', id).maybeSingle();
-      if (error) {
-        console.error('GET /admin/article/:id supabase error:', error);
-        return res.status(500).json({ error: error.message });
-      }
-      if (!data) return res.status(404).json({ error: 'Article not found' });
-      res.json({ data });
-    } catch (err) {
-      console.error('GET /admin/article/:id error', err && err.message ? err.message : err);
-      res.status(500).json({ error: 'Server error' });
+      const [
+        { count: totalArticles },
+        { count: deletedArticles },
+        { data: recentArticles }
+      ] = await Promise.all([
+        supabaseAdmin
+          .from('ai_news')
+          .select('*', { count: 'exact', head: true })
+          .is('deleted_at', null),
+        
+        supabaseAdmin
+          .from('ai_news')
+          .select('*', { count: 'exact', head: true })
+          .not('deleted_at', 'is', null),
+        
+        supabaseAdmin
+          .from('ai_news')
+          .select('genre, region, created_at')
+          .order('created_at', { ascending: false })
+          .limit(100)
+      ]);
+
+      // Calculate stats
+      const stats = {
+        total: totalArticles || 0,
+        deleted: deletedArticles || 0,
+        active: (totalArticles || 0) - (deletedArticles || 0),
+        byGenre: {},
+        byRegion: {},
+        recent: recentArticles?.slice(0, 10) || []
+      };
+
+      // Count by genre and region
+      recentArticles?.forEach(article => {
+        stats.byGenre[article.genre] = (stats.byGenre[article.genre] || 0) + 1;
+        stats.byRegion[article.region] = (stats.byRegion[article.region] || 0) + 1;
+      });
+
+      res.json({
+        success: true,
+        stats
+      });
+
+    } catch (error) {
+      console.error('[ADMIN] Stats error:', error);
+      res.status(500).json({ 
+        success: false,
+        error: 'Server error',
+        message: error.message 
+      });
     }
+  });
+
+  // GET /admin/health - Health check
+  router.get('/health', (req, res) => {
+    res.json({
+      success: true,
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      admin_emails_count: ADMIN_EMAILS.length,
+      supabase_url: SUPABASE_URL ? 'configured' : 'missing'
+    });
   });
 
   return router;
