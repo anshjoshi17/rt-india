@@ -3,7 +3,6 @@
 require("dotenv").config();
 
 const express = require("express");
-const cors = require("cors");
 const slugify = require("slugify");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -11,53 +10,13 @@ const { createClient } = require("@supabase/supabase-js");
 const { fetchRSSFeed, RSS_SOURCES } = require("./rss-fetcher");
 const { fetchFromNewsAPI, fetchFromGNewsAPI, API_SOURCES } = require("./api-fetchers");
 
+// Centralized CORS configuration (see cors-config.js)
+const { configureCors } = require("./cors-config");
+
 const app = express();
 
-/* -------------------- CORS Configuration -------------------- */
-const DEFAULT_ALLOWED_ORIGINS = [
-  "https://rt-india.com",
-  "https://www.rt-india.com",
-  "https://rt-india.onrender.com",
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:3000",
-  "http://127.0.0.1:5173"
-];
-
-const extraOrigins = (process.env.ADDITIONAL_ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const allowedOrigins = Array.from(new Set(DEFAULT_ALLOWED_ORIGINS.concat(extraOrigins)));
-const allowAll = String(process.env.CORS_ALLOW_ALL || "false").toLowerCase() === "true";
-const allowCredentials = String(process.env.CORS_ALLOW_CREDENTIALS || "false").toLowerCase() === "true";
-
-const corsOptions = {
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowAll) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error("Not allowed by CORS: " + origin));
-  },
-  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "Accept",
-    "Cache-Control",
-    "Pragma",
-    "X-Requested-With",
-    "Origin",
-    "X-CSRF-Token"
-  ],
-  exposedHeaders: ["Content-Range", "X-Content-Range"],
-  credentials: allowCredentials,
-  maxAge: 86400
-};
-
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+/* -------------------- CORS Configuration (moved to cors-config.js) -------------------- */
+configureCors(app);
 
 app.use((req, res, next) => {
   res.header("X-Content-Type-Options", "nosniff");
