@@ -7,8 +7,9 @@ const express = require('express');
  * @param {string} deps.SUPABASE_URL - e.g. process.env.SUPABASE_URL
  * @param {import('@supabase/supabase-js').SupabaseClient} deps.supabaseAdmin - supabase client instantiated with service role key
  * @param {string[]} deps.ADMIN_EMAILS - array of allowed admin emails (lowercase)
+ * @param {string} deps.SUPABASE_ANON_KEY - supabase anon public key (used when validating tokens via auth/v1/user)
  */
-module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMIN_EMAILS = [] }) {
+module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMIN_EMAILS = [], SUPABASE_ANON_KEY = '' }) {
   if (!SUPABASE_URL) throw new Error('SUPABASE_URL required for adminRoutesFactory');
   if (!supabaseAdmin) throw new Error('supabaseAdmin client required for adminRoutesFactory');
 
@@ -21,27 +22,41 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
       const token = (authHeader.split(' ')[1] || '').trim();
       if (!token) return res.status(401).json({ error: 'Missing Authorization token' });
 
-      // Supabase v1 user endpoint works with Bearer token
-      const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      // Supabase v1 user endpoint works with Bearer token.
+      // Include anon key for reliability.
+      const headers = {
+        Authorization: `Bearer ${token}`
+      };
+      if (SUPABASE_ANON_KEY) headers.apikey = SUPABASE_ANON_KEY;
+
+      const r = await fetch(`${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/user`, {
         method: 'GET',
-        headers: { Authorization: `Bearer ${token}` }
+        headers
       });
 
       if (!r.ok) {
         const txt = await r.text().catch(() => '');
-        return res.status(401).json({ error: 'Invalid token', details: txt });
+        // return details but keep it concise
+        console.warn('requireAdmin: /auth/v1/user returned', r.status, txt || '(no body)');
+        return res.status(401).json({ error: 'Invalid token', details: txt || `status ${r.status}` });
       }
 
       const user = await r.json().catch(() => null);
-      if (!user || !user.email) return res.status(401).json({ error: 'Unable to fetch user info' });
+      if (!user || !user.email) {
+        console.warn('requireAdmin: user endpoint returned no email', user);
+        return res.status(401).json({ error: 'Unable to fetch user info' });
+      }
 
-      const email = user.email.toLowerCase();
+      const email = String(user.email || '').toLowerCase();
+      console.info('requireAdmin: authenticated user email ->', email);
+
       if (!ADMIN_EMAILS.includes(email)) {
+        console.warn('requireAdmin: forbidden - email not in ADMIN_EMAILS:', email);
         return res.status(403).json({ error: 'Forbidden - not an admin' });
       }
 
       // attach minimal user info
-      req.adminUser = { id: user.id, email: email };
+      req.adminUser = { id: user.id, email };
       next();
     } catch (err) {
       console.error('requireAdmin error', err && err.message ? err.message : err);
@@ -67,13 +82,10 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
         .range(offset, offset + limit - 1);
 
       if (!includeDeleted) {
-        // gracefully skip rows where deleted_at is set (assuming soft-delete not used, safe)
-        // If you don't have a deleted_at column, this filter does nothing.
         query = query.is('deleted_at', null);
       }
 
       if (q) {
-        // simple ilike across title, short_desc, region, genre, slug
         const escaped = q.replace(/%/g, '\\%').replace(/,/g, ' ');
         query = query.or(
           `title.ilike.%${escaped}%,short_desc.ilike.%${escaped}%,region.ilike.%${escaped}%,genre.ilike.%${escaped}%,slug.ilike.%${escaped}%`
@@ -81,7 +93,10 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
       }
 
       const { data, error, count } = await query;
-      if (error) return res.status(500).json({ error: error.message });
+      if (error) {
+        console.error('GET /admin/articles supabase error:', error);
+        return res.status(500).json({ error: error.message });
+      }
 
       res.json({ data, count });
     } catch (err) {
@@ -96,7 +111,6 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
   router.post('/articles', requireAdmin, async (req, res) => {
     try {
       const payload = req.body || {};
-      // defensive: ensure required fields exist
       const record = {
         title: payload.title || 'Untitled',
         slug: payload.slug || null,
@@ -111,9 +125,11 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
       };
 
       const { data, error } = await supabaseAdmin.from('ai_news').insert([record]).select().single();
-      if (error) return res.status(500).json({ error: error.message });
+      if (error) {
+        console.error('POST /admin/articles supabase error:', error);
+        return res.status(500).json({ error: error.message });
+      }
 
-      // try writing an audit row (optional table)
       try {
         await supabaseAdmin.from('admin_audit').insert([{
           admin_email: req.adminUser.email,
@@ -123,7 +139,7 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
           created_at: new Date().toISOString()
         }]);
       } catch (e) {
-        // Ignore audit errors
+        // ignore audit errors
       }
 
       res.status(201).json({ data });
@@ -140,13 +156,14 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
     try {
       const { id } = req.params;
       const payload = req.body || {};
-      // disallow changing id
       delete payload.id;
 
       const { data, error } = await supabaseAdmin.from('ai_news').update(payload).eq('id', id).select().single();
-      if (error) return res.status(500).json({ error: error.message });
+      if (error) {
+        console.error('PUT /admin/articles/:id supabase error:', error);
+        return res.status(500).json({ error: error.message });
+      }
 
-      // attempt audit
       try {
         await supabaseAdmin.from('admin_audit').insert([{
           admin_email: req.adminUser.email,
@@ -166,7 +183,6 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
 
   /* --------------------
      DELETE /admin/articles/:id -> hard delete (or soft if requested)
-     Query param ?soft=true to perform soft-delete (requires deleted_at column)
   -------------------- */
   router.delete('/articles/:id', requireAdmin, async (req, res) => {
     try {
@@ -174,9 +190,11 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
       const soft = (req.query.soft || 'false').toLowerCase() === 'true';
 
       if (soft) {
-        // set deleted_at timestamp (if column exists)
         const { data, error } = await supabaseAdmin.from('ai_news').update({ deleted_at: new Date().toISOString() }).eq('id', id).select().single();
-        if (error) return res.status(500).json({ error: error.message });
+        if (error) {
+          console.error('DELETE soft supabase error:', error);
+          return res.status(500).json({ error: error.message });
+        }
 
         try {
           await supabaseAdmin.from('admin_audit').insert([{
@@ -190,9 +208,11 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
 
         return res.json({ data, message: 'soft deleted' });
       } else {
-        // hard delete
         const { data, error } = await supabaseAdmin.from('ai_news').delete().eq('id', id).select().single();
-        if (error) return res.status(500).json({ error: error.message });
+        if (error) {
+          console.error('DELETE hard supabase error:', error);
+          return res.status(500).json({ error: error.message });
+        }
 
         try {
           await supabaseAdmin.from('admin_audit').insert([{
@@ -219,7 +239,10 @@ module.exports = function adminRoutesFactory({ SUPABASE_URL, supabaseAdmin, ADMI
     try {
       const { id } = req.params;
       const { data, error } = await supabaseAdmin.from('ai_news').select('*').eq('id', id).maybeSingle();
-      if (error) return res.status(500).json({ error: error.message });
+      if (error) {
+        console.error('GET /admin/article/:id supabase error:', error);
+        return res.status(500).json({ error: error.message });
+      }
       if (!data) return res.status(404).json({ error: 'Article not found' });
       res.json({ data });
     } catch (err) {

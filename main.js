@@ -22,10 +22,12 @@ if (!process.env.SUPABASE_URL) {
 } else {
   try {
     app.use('/admin', adminRoutesFactory({
-      SUPABASE_URL: process.env.SUPABASE_URL,
-      supabaseAdmin: supabase,
-      ADMIN_EMAILS
-    }));
+    SUPABASE_URL: process.env.SUPABASE_URL,
+    supabaseAdmin: supabase,
+    ADMIN_EMAILS,
+    SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || ''
+}));
+
     console.log('🔐 Admin routes mounted at /admin');
   } catch (e) {
     console.error('Failed to mount admin routes:', e && e.message ? e.message : e);
