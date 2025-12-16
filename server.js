@@ -1183,7 +1183,7 @@ async function processAllNews() {
   return successful;
 }
 
-/* -------------------- Schedule & Cleanup (2 days retention) -------------------- */
+/* -------------------- Schedule (no automatic cleanup of old articles) -------------------- */
 let isProcessing = false;
 
 async function runScheduledProcessing() {
@@ -1197,22 +1197,7 @@ async function runScheduledProcessing() {
   try {
     await processAllNews();
 
-    // Cleanup old articles (keep 2 days)
-    try {
-      const cutoff = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
-      const { error, count } = await supabase
-        .from("ai_news")
-        .delete()
-        .lt("created_at", cutoff);
-
-      if (error) {
-        console.warn("Cleanup error:", error.message);
-      } else {
-        console.log(`🧹 Cleanup completed: ${count || 0} old articles (older than 2 days) removed`);
-      }
-    } catch (cleanupError) {
-      console.warn("Cleanup failed:", cleanupError.message);
-    }
+    // NOTE: automatic deletion/cleanup of old articles was removed per request.
 
   } catch (error) {
     console.error("Scheduled processing failed:", error.message);
