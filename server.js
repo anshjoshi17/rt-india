@@ -1,3 +1,5 @@
+// server.js - ENHANCED VERSION: LATEST HINDI NEWS (Uttarakhand → National → International)
+// Main orchestration file - RSS and API fetching separated into modules
 require("dotenv").config();
 
 const express = require("express");
@@ -366,13 +368,57 @@ function removeNoisyFragmentsPreserveContent(text) {
 
 function aggressiveCleanArticle(text) {
   if (!text) return '';
+
+  // Step 1: Basic cleaning (links, emails, phones, handles)
   let cleaned = stripLinksAndHandles(text);
   cleaned = removeNoisyFragmentsPreserveContent(cleaned);
+
+  // Step 2: Remove Hindi promotional / UI noise (add more patterns if needed)
+  const noisePatterns = [
+    /विज्ञापन/gi,
+    /एप डाउनलोड करें/gi,
+    /यह खबर एप पर पढ़ें/gi,
+    /वीडियो विज्ञापन देखें/gi,
+    /संक्षिप्त विज्ञापन देखें/gi,
+    /अगर आपके पास प्रीमियम मेंबरशिप है तो लॉगिन करें/gi,
+    /ट्रेंडिंग वीडियो/gi,
+    /और पढ़ें/gi,
+    /लिंक कॉपी/gi,
+    /खबरें लगातार पढ़ने के लिए/gi,
+    /फेसबुक[^|]*/gi,
+    /ट्विटर[^|]*/gi,
+    /शेयर करें/gi,
+    /फॉलो करें/gi,
+    /सब्सक्राइब करें/gi,
+    /ज़्यादा जानें/gi,
+    /पूरा वीडियो देखें/gi,
+    /वीडियो देखें/gi,
+    /प्रीमियम मेंबरशिप/gi
+  ];
+
+  for (const pattern of noisePatterns) {
+    cleaned = cleaned.replace(pattern, ' ');
+  }
+
+  // Step 3: Remove very short lines that likely are ads or social buttons
+  const lines = cleaned.split('\n');
+  const filteredLines = lines.filter(line => {
+    const trimmed = line.trim();
+    if (trimmed.length < 15) return false;               // too short
+    if (trimmed.match(/^[अ-औक-ह]{1,6}$/)) return false; // single Hindi word like "विज्ञापन"
+    if (/\b(विज्ञापन|डाउनलोड|शेयर|फॉलो|सब्सक्राइब)\b/.test(trimmed)) return false;
+    return true;
+  });
+  cleaned = filteredLines.join('\n');
+
+  // Step 4: Remove HTML tags
   cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, '')
                    .replace(/<style[\s\S]*?<\/style>/gi, '')
                    .replace(/<\/?[^>]+(>|$)/g, '');
-  cleaned = cleaned.replace(/\{(?:[^{}]|"(?:\\.|[^"\\])")\}/g, ' ');
+
+  // Step 5: Collapse whitespace
   cleaned = cleaned.replace(/\s{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+
   return cleaned;
 }
 
@@ -431,6 +477,16 @@ function finalizeArticleStrict(title, content) {
   c = c.replace(/\n{4,}/g, '\n\n').trim();
   return { title: t, content: c, wordCount: (c.split(/\s+/).filter(Boolean) || []).length };
 }
+function finalCleanAI(content) {
+  let cleaned = content;
+  const noiseRegex = /(विज्ञापन|एप डाउनलोड करें|ट्रेंडिंग वीडियो|और पढ़ें|लिंक कॉपी|खबरें लगातार पढ़ने के लिए|शेयर करें|फॉलो करें|सब्सक्राइब करें|ज़्यादा जानें|वीडियो देखें)/gi;
+  cleaned = cleaned.replace(noiseRegex, '');
+  cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
+  return cleaned;
+}
+
+// Inside rewriteWithParallelAI, after final = finalizeArticleStrict(...)
+final.content = finalCleanAI(final.content);
 
 function isMostlyDevanagari(text, threshold = 0.30) {
   if (!text) return false;
